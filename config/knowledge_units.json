@@ -1,0 +1,14 @@
+{
+  "target_tokens": 600,
+  "min_tokens": 120,
+  "max_tokens": 1000,
+  "prefix_max_chars": 240,
+  "review_confidence": 0.6,
+  "ignored_raw_labels": [
+    "number",
+    "header",
+    "footer",
+    "header_image",
+    "footer_image"
+  ]
+}
