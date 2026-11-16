@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/opendatalab/MinerU",
+  "branch": "master",
+  "commit": "4fe4bde114a23ee5dd637eae99b767f4669bf58c",
+  "version": "3.4.5",
+  "retrieved_at": "2026-08-15",
+  "retrieval_method": "GitHub source archive",
+  "archive_url": "https://codeload.github.com/opendatalab/MinerU/tar.gz/refs/heads/master",
+  "archive_sha256": "a6f89ee172547fb80beb3f5975ec09197bba107bea1ba2833dd8091e23319e91",
+  "local_path": "../third_party/MinerU"
+}

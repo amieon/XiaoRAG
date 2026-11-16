@@ -1,0 +1,23 @@
+{
+  "gate": {
+    "risk_threshold": 0.45,
+    "max_feature_side": 384,
+    "min_visual_contrast": 0.15,
+    "min_crop_side": 12,
+    "formula_overlap_threshold": 0.15,
+    "orientation_angle_threshold": 15.0,
+    "math_score_threshold": 0.45
+  },
+  "min_layout_box_side": 6.0,
+  "native_min_coverage": 0.9,
+  "max_new_tokens": 4096,
+  "save_region_images": true,
+  "drop_layout_labels": ["reference"],
+  "figure_labels": ["image", "header_image", "footer_image", "figure"],
+  "markdown_ignore_labels": ["number", "footnote", "header", "header_image", "footer", "footer_image", "aside_text"],
+  "ocr_pixel_limits": [112896, 1003520],
+  "table_pixel_limits": [112896, 1003520],
+  "formula_pixel_limits": [112896, 1003520],
+  "chart_pixel_limits": [112896, 1003520],
+  "seal_pixel_limits": [112896, 1003520]
+}
