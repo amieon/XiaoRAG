@@ -11,9 +11,9 @@ import tempfile
 import threading
 from typing import Any, Mapping
 
-from .explicit_pipeline import (
-    ExplicitParserConfig,
-    ExplicitRegionParser,
+from .pipeline import (
+    ParserConfig,
+    RegionPipeline,
     PageParseResult,
     public_result_dict,
 )
@@ -57,13 +57,13 @@ def _read_response(stream: Any, timeout: float) -> dict:
     return response
 
 
-class PublicPaddleBackend:
+class PaddleModelBackend:
     """Separate layout, VLM, and light-OCR models behind a small public adapter."""
 
     def __init__(
         self,
         root: str | Path,
-        config: ExplicitParserConfig,
+        config: ParserConfig,
         *,
         layout_model_name: str = "PP-DocLayoutV3",
         layout_model_dir: str | Path | None = None,
@@ -97,7 +97,7 @@ class PublicPaddleBackend:
                 batch_size=1,
             )
             self.worker = subprocess.Popen(
-                [sys.executable, str(self.root / "scripts" / "hybrid_ocr_worker.py")],
+                [sys.executable, str(self.root / "scripts" / "light_ocr_worker.py")],
                 cwd=self.root,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -149,7 +149,7 @@ class PublicPaddleBackend:
     def recognize_text(self, images: list[Any]) -> list[dict[str, Any]]:
         import numpy as np
 
-        with tempfile.TemporaryDirectory(prefix="explicit-light-ocr-") as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="light-ocr-") as temp_dir:
             paths = []
             for index, image in enumerate(images):
                 path = Path(temp_dir) / f"{index:04d}.npy"
@@ -192,12 +192,12 @@ class PublicPaddleBackend:
         self.vlm_model = None
 
 
-class ExplicitParserRuntime:
+class PageRuntime:
     """Resident, serial runtime shared by all files in a folder batch."""
 
-    def __init__(self, root: str | Path, config: ExplicitParserConfig) -> None:
-        self.backend = PublicPaddleBackend(root, config)
-        self.parser = ExplicitRegionParser(self.backend, config)
+    def __init__(self, root: str | Path, config: ParserConfig) -> None:
+        self.backend = PaddleModelBackend(root, config)
+        self.parser = RegionPipeline(self.backend, config)
         self.lock = threading.Lock()
 
     def parse_page(self, *args, **kwargs) -> PageParseResult:

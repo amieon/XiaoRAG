@@ -205,7 +205,12 @@ def _render_office(source: Path, staging: Path, converter: str | None) -> Path:
     if not executable:
         raise RuntimeError("Office rendering requires LibreOffice; set DOCUMENT_OFFICE_CONVERTER to its executable")
     staging.mkdir(parents=True, exist_ok=True)
-    command = [executable, "--headless", "--convert-to", "pdf", "--outdir", str(staging), str(source)]
+    # 并发转换必须隔离 LibreOffice 用户配置目录，否则多个 soffice 会争抢同一实例。
+    profile = (staging / "libreoffice-profile").resolve()
+    command = [
+        executable, f"-env:UserInstallation={profile.as_uri()}", "--headless",
+        "--convert-to", "pdf", "--outdir", str(staging), str(source),
+    ]
     completed = subprocess.run(command, capture_output=True, text=True, timeout=180, check=False)
     target = staging / f"{source.stem}.pdf"
     if completed.returncode or not target.is_file():

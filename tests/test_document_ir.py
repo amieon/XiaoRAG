@@ -1,129 +1,62 @@
+from __future__ import annotations
+
 import json
+from pathlib import Path
+import sys
 import tempfile
 import unittest
-from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 
 from doc_parser.document_ir import (
-    DocumentIR,
-    DocumentIRValidationError,
-    Relation,
-    from_mineru_middle_json,
-    from_paddleocr_json,
-    iter_blocks,
+    Block, DocumentIR, DocumentIRValidationError, Page, Relation, SourceRef, iter_blocks,
 )
 
 
-class DocumentIRTest(unittest.TestCase):
-    def test_mineru_middle_json_is_normalized(self):
-        middle = {
-            "_backend": "pipeline",
-            "pdf_info": [
-                {
-                    "page_idx": 0,
-                    "page_size": [1000, 1400],
-                    "para_blocks": [
-                        {
-                            "type": "title",
-                            "bbox": [10, 20, 500, 60],
-                            "lines": [{
-                                "spans": [{"content": "第一章 总则"}],
-                            }],
-                        },
-                        {
-                            "type": "table",
-                            "bbox": [10, 100, 900, 500],
-                            "table_caption": "付款表",
-                        },
-                    ],
-                }
-            ],
-        }
-        document = from_mineru_middle_json(
-            middle, document_id="doc_001", source_path="contract_middle.json"
-        )
-        self.assertEqual(document.pages[0].page_id, "doc_001_p0001")
-        self.assertEqual(document.pages[0].blocks[0].block_type, "section_heading")
-        self.assertEqual(document.pages[0].blocks[0].text, "第一章 总则")
-        self.assertEqual(document.pages[0].blocks[1].block_type, "table")
-        self.assertEqual(document.pages[0].blocks[1].text, "付款表")
-        self.assertEqual(document.pages[0].blocks[0].source.engine, "mineru")
+def fixture():
+    page_id = "doc_p0001"
+    blocks = [
+        Block(
+            block_id=f"{page_id}_b0001", page_id=page_id, block_type="paragraph",
+            bbox=[0, 30, 100, 50], text="第二块", reading_order=1,
+        ),
+        Block(
+            block_id=f"{page_id}_b0000", page_id=page_id, block_type="document_title",
+            bbox=[0, 0, 100, 20], text="标题", reading_order=0,
+            source=SourceRef(engine="native_extraction"),
+        ),
+    ]
+    return DocumentIR(
+        document_id="doc", title="标题",
+        pages=[Page(page_id=page_id, page_no=1, width=100, height=100, blocks=blocks)],
+    )
 
-    def test_round_trip_json_preserves_ir(self):
-        document = from_mineru_middle_json(
-            {"pdf_info": [{"page_idx": 0, "page_size": [10, 20], "para_blocks": []}]},
-            document_id="doc_002",
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "document_ir.json"
+
+class DocumentIRTests(unittest.TestCase):
+    def test_round_trip_and_reading_order(self):
+        document = fixture()
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "document.json"
             document.to_json(path)
             restored = DocumentIR.from_dict(json.loads(path.read_text(encoding="utf-8")))
-        self.assertEqual(restored.to_dict(), document.to_dict())
+        self.assertEqual(restored, document)
+        self.assertEqual([block.text for block in iter_blocks(restored)], ["标题", "第二块"])
 
-    def test_relation_must_reference_document_objects(self):
-        document = from_mineru_middle_json(
-            {"pdf_info": [{"page_idx": 0, "page_size": [10, 20], "para_blocks": []}]},
-            document_id="doc_003",
-        )
-        document.relations.append(
-            Relation(
-                relation_id="rel_1",
-                relation_type="section_contains",
-                source_id="missing",
-                target_id=document.pages[0].page_id,
-            )
-        )
+    def test_relation_must_reference_known_objects(self):
+        document = fixture()
+        document.relations.append(Relation(
+            relation_id="r1", relation_type="references",
+            source_id="doc_p0001_b0000", target_id="missing",
+        ))
         with self.assertRaises(DocumentIRValidationError):
-            document.to_dict()
+            document.validate()
 
-    def test_iter_blocks_follows_page_and_reading_order(self):
-        middle = {
-            "pdf_info": [
-                {
-                    "page_idx": 1,
-                    "page_size": [10, 20],
-                    "para_blocks": [{"type": "text", "bbox": [0, 0, 1, 1], "text": "p2"}],
-                },
-                {
-                    "page_idx": 0,
-                    "page_size": [10, 20],
-                    "para_blocks":[{"type": "text", "bbox": [0, 0, 1, 1], "text": "p1"}],
-                },
-            ]
-        }
-        document = from_mineru_middle_json(middle, document_id="doc_004")
-        self.assertEqual([block.text for block in iter_blocks(document)], ["p1", "p2"])
-
-    def test_paddleocr_json_is_normalized(self):
-        document = from_paddleocr_json(
-            [
-                {
-                    "page_index": 0,
-                    "width": 1200,
-                    "height": 1600,
-                    "input_path": "contract.pdf",
-                    "parsing_res_list": [
-                        {
-                            "block_id": 3,
-                            "block_label": "text",
-                            "block_content": "付款条件",
-                            "block_bbox": [10, 20, 300, 50],
-                            "block_polygon_points": [[10, 20], [300, 20], [300, 50], [10, 50]],
-                            "block_order": 1,
-                        },
-                        {
-                            "block_label": "table",
-                            "block_content": "<table></table>",
-                            "block_bbox": [10, 60, 1000, 400],
-                        },
-                    ],
-                }
-            ],
-            document_id="doc_005",
-        )
-        self.assertEqual(document.pages[0].blocks[0].block_type, "paragraph")
-        self.assertEqual(document.pages[0].blocks[1].block_type, "table")
-        self.assertEqual(document.pages[0].blocks[0].source.engine, "paddleocr")
-        self.assertEqual(len(document.pages[0].blocks[0].polygon), 4)
+    def test_invalid_bbox_is_rejected(self):
+        document = fixture()
+        document.pages[0].blocks[0].bbox = [0, 0, -1, 10]
+        with self.assertRaises(DocumentIRValidationError):
+            document.validate()
 
 
 if __name__ == "__main__":

@@ -1,50 +1,13 @@
 .venv/
-.idea/
 __pycache__/
 *.py[cod]
-*.egg-info/
-.DS_Store
 .env
-.env.local
-.env.*
-!.env.example
 .cache/
-var/
 models/
-
-# Runtime artifacts, offline images and local credentials
-/output/
-/third_party/
-*.log
-*.tar
-*.tar.gz
+datasets/
+var/
+outputs/
 *.zip
-*.whl
-*.deb
-*.part[0-9][0-9][0-9]
-*.pem
-*.key
-*.xsh
-*.xfp
-/known_hosts
-/.docker-config/
-/EVAL_STATE.json
-/EVAL_STATUS.md
-/EVAL_FINAL.md
-/config/*.local.json
-
-# Generated research datasets and downloaded survey source snapshots
-/datasets/OmniDocBench/samples/multipage_v2/
-/datasets/OmniDocBench/samples/multipage_win/
-/datasets/memory_papers_v1/
-/docs/method-survey-2026-09-22/evidence/
-
-# Downloaded datasets and nested evaluation repositories
-datasets/*/data/
-datasets/*/evaluator/
-
-# Dataset-derived samples may inherit upstream license restrictions
-datasets/*/samples/*/images/
-datasets/*/samples/*/*.json
-datasets/*/samples/multipage/
-datasets/*/samples/multipage-contiguous/
+.DS_Store
+Thumbs.db
+.idea

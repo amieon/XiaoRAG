@@ -19,5 +19,10 @@
   "table_pixel_limits": [112896, 1003520],
   "formula_pixel_limits": [112896, 1003520],
   "chart_pixel_limits": [112896, 1003520],
-  "seal_pixel_limits": [112896, 1003520]
+  "seal_pixel_limits": [112896, 1003520],
+  "cpu_workers": 0,
+  "gpu_workers": 0,
+  "max_gpu_workers": 4,
+  "gpu_free_margin_mb": 4096,
+  "gpu_worker_floor_mb": 2048
 }

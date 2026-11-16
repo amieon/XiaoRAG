@@ -11,13 +11,13 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from doc_parser.document_ir import DocumentIR
-from doc_parser.explicit_pipeline import (
-    ExplicitParserConfig,
-    ExplicitRegionParser,
+from doc_parser.pipeline import (
+    ParserConfig,
+    RegionPipeline,
     public_result_dict,
 )
-from doc_parser.page_routing import GateConfig, Region, VisualGate
-from doc_parser.public_models import PublicPaddleBackend
+from doc_parser.routing import GateConfig, Region, VisualGate
+from doc_parser.model_backend import PaddleModelBackend
 
 
 class FakeBackend:
@@ -45,7 +45,7 @@ class FakeBackend:
             ]
 
 
-class ExplicitPipelineTests(unittest.TestCase):
+class PipelineTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -62,7 +62,7 @@ class ExplicitPipelineTests(unittest.TestCase):
         self.assertEqual(public_result_dict({"res": {"result": "ok"}}), {"result": "ok"})
 
     def test_layout_adapter_drops_full_page_pixels(self):
-        backend = PublicPaddleBackend.__new__(PublicPaddleBackend)
+        backend = PaddleModelBackend.__new__(PaddleModelBackend)
         backend.layout_model = type("FakeLayout", (), {
             "predict": lambda self, image: iter([{
                 "input_img": image, "boxes": [],
@@ -90,7 +90,7 @@ class ExplicitPipelineTests(unittest.TestCase):
             {"label": "image", "coordinate": [0, 50, 50, 90], "score": 0.88},
         ])
         output = self.root / "out"
-        result = ExplicitRegionParser(backend).parse_image(
+        result = RegionPipeline(backend).parse_image(
             self.image_path,
             document_id="doc_test",
             page_no=1,
@@ -116,12 +116,12 @@ class ExplicitPipelineTests(unittest.TestCase):
         document = DocumentIR(document_id="doc_test", pages=[result.page])
         document.validate()
         payload = json.loads((output / "page_result.json").read_text(encoding="utf-8"))
-        self.assertEqual(payload["schema_version"], "explicit-page.v1")
+        self.assertEqual(payload["schema_version"], "page-result.v2")
         self.assertEqual(len(payload["page"]["blocks"]), 3)
 
     def test_public_vlm_adapter_passes_items_and_generation_limits(self):
-        backend = PublicPaddleBackend.__new__(PublicPaddleBackend)
-        backend.config = ExplicitParserConfig(max_new_tokens=123)
+        backend = PaddleModelBackend.__new__(PaddleModelBackend)
+        backend.config = ParserConfig(max_new_tokens=123)
         calls = []
 
         class FakeVLM:
@@ -145,7 +145,7 @@ class ExplicitPipelineTests(unittest.TestCase):
         backend = FakeBackend([
             {"label": "text", "coordinate": [0, 0, 55, 40]},
         ])
-        result = ExplicitRegionParser(backend).parse_image(
+        result = RegionPipeline(backend).parse_image(
             self.image_path,
             document_id="doc_native",
             page_no=1,
@@ -162,14 +162,14 @@ class ExplicitPipelineTests(unittest.TestCase):
         self.assertEqual(result.records[0]["engine"], "native_text")
 
     def test_config_round_trip_and_threshold_override(self):
-        config = ExplicitParserConfig.from_dict({
+        config = ParserConfig.from_dict({
             "gate": {"formula_overlap_threshold": 0.3},
             "ocr_pixel_limits": [1000, 2000],
         })
         self.assertEqual(config.gate.formula_overlap_threshold, 0.3)
         self.assertEqual(config.gate.risk_threshold, GateConfig().risk_threshold)
         self.assertEqual(config.ocr_pixel_limits, (1000, 2000))
-        restored = ExplicitParserConfig.from_dict(config.to_dict())
+        restored = ParserConfig.from_dict(config.to_dict())
         self.assertEqual(restored, config)
 
 

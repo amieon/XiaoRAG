@@ -1,9 +1,7 @@
-"""Explicit public-model region pipeline producing canonical DocumentIR.
+"""公开模型区域管线：版面检测、裁图、路由、识别与 DocumentIR 组装。
 
-No PaddleOCR/PaddleX pipeline internals are imported or monkey-patched here.
-Model-backed adapters implement three public operations: detect_layout,
-recognize_text, and recognize_vlm.  Pure routing and IR assembly remain testable
-with small fake backends.
+模型适配器只提供 detect_layout、recognize_text、recognize_vlm 三个操作。
+纯路由和 IR 组装可以用小型假后端做无模型测试。
 """
 from __future__ import annotations
 
@@ -14,7 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from .document_ir import Block, DocumentIR, Page, SourceRef
-from .page_routing import (
+from .routing import (
     GateConfig,
     VisualGate,
     attach_native_text,
@@ -24,11 +22,11 @@ from .page_routing import (
 )
 
 
-PIPELINE_VERSION = "explicit-public-v1"
+PIPELINE_VERSION = "document-ir-v2"
 
 
 class Backend(Protocol):
-    """The only model surface used by the explicit pipeline."""
+    """区域管线使用的全部模型接口。"""
 
     def detect_layout(self, image: Any) -> Mapping[str, Any]: ...
 
@@ -38,8 +36,8 @@ class Backend(Protocol):
 
 
 @dataclass(frozen=True)
-class ExplicitParserConfig:
-    """Auditable policy constants; defaults preserve the previous visual gate."""
+class ParserConfig:
+    """可审计的识别、路由与并行配置。"""
 
     gate: GateConfig = field(default_factory=GateConfig)
     min_layout_box_side: float = 6.0
@@ -59,6 +57,12 @@ class ExplicitParserConfig:
     formula_pixel_limits: tuple[int, int] = (112896, 1003520)
     chart_pixel_limits: tuple[int, int] = (112896, 1003520)
     seal_pixel_limits: tuple[int, int] = (112896, 1003520)
+    # 0 表示自动：CPU 按任务数取小并发，GPU 逐个加载并按空闲显存准入。
+    cpu_workers: int = 0
+    gpu_workers: int = 0
+    max_gpu_workers: int = 4
+    gpu_free_margin_mb: int = 4096
+    gpu_worker_floor_mb: int = 2048
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.min_layout_box_side) or self.min_layout_box_side < 1:
@@ -67,6 +71,16 @@ class ExplicitParserConfig:
             raise ValueError("native_min_coverage must be in [0, 1]")
         if self.max_new_tokens < 1:
             raise ValueError("max_new_tokens must be positive")
+        for name in ("cpu_workers", "gpu_workers"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer; 0 means auto")
+        if not isinstance(self.max_gpu_workers, int) or self.max_gpu_workers < 1:
+            raise ValueError("max_gpu_workers must be a positive integer")
+        if not isinstance(self.gpu_free_margin_mb, int) or self.gpu_free_margin_mb < 0:
+            raise ValueError("gpu_free_margin_mb must be a non-negative integer")
+        if not isinstance(self.gpu_worker_floor_mb, int) or self.gpu_worker_floor_mb < 1:
+            raise ValueError("gpu_worker_floor_mb must be a positive integer")
         for name in (
             "ocr_pixel_limits", "table_pixel_limits", "formula_pixel_limits",
             "chart_pixel_limits", "seal_pixel_limits",
@@ -79,7 +93,7 @@ class ExplicitParserConfig:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "ExplicitParserConfig":
+    def from_dict(cls, value: Mapping[str, Any]) -> "ParserConfig":
         data = dict(value)
         if "gate" in data:
             data["gate"] = GateConfig(**dict(data["gate"]))
@@ -93,7 +107,7 @@ class ExplicitParserConfig:
         return cls(**data)
 
     @classmethod
-    def from_json(cls, path: str | Path) -> "ExplicitParserConfig":
+    def from_json(cls, path: str | Path) -> "ParserConfig":
         return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
@@ -173,7 +187,7 @@ def prompt_for_label(label: str) -> str | None:
     return "OCR:"
 
 
-def _pixel_limits(label: str, config: ExplicitParserConfig) -> tuple[int, int]:
+def _pixel_limits(label: str, config: ParserConfig) -> tuple[int, int]:
     normalized = label.lower()
     if normalized == "table":
         return config.table_pixel_limits
@@ -227,9 +241,9 @@ def build_regions(
     layout: Mapping[str, Any],
     *,
     native_blocks: list[dict] | None = None,
-    config: ExplicitParserConfig = ExplicitParserConfig(),
+    config: ParserConfig = ParserConfig(),
 ) -> list[PageRegion]:
-    """Convert public layout JSON into explicit, ordered crop objects."""
+    """把公开版面结果转换成有稳定次序的区域裁图对象。"""
     height, width = image.shape[:2]
     detectors: list[dict] = []
     blocks: list[dict] = []
@@ -290,7 +304,7 @@ def build_regions(
 def group_regions(
     regions: list[PageRegion], *, page_index: int,
 ) -> dict[tuple[int, int], dict]:
-    """Build the old router's public-in-this-project batch structure directly."""
+    """按像素限制分组，同时保留每个区域的页号与区域号。"""
     groups: dict[tuple[int, int], dict] = {}
     for region in regions:
         if region.query is None or region.pixel_key is None:
@@ -348,7 +362,7 @@ def _layout_only_record(region: PageRegion, page_index: int) -> dict[str, Any]:
     }
 
 
-def render_markdown(page: Page, config: ExplicitParserConfig) -> str:
+def render_markdown(page: Page, config: ParserConfig) -> str:
     """Deterministic human-facing export; DocumentIR remains the primary output."""
     chunks: list[str] = []
     for block in sorted(page.blocks, key=lambda item: item.reading_order or 0):
@@ -378,20 +392,17 @@ def render_markdown(page: Page, config: ExplicitParserConfig) -> str:
     return "\n\n".join(chunks) + ("\n" if chunks else "")
 
 
-class ExplicitRegionParser:
+class RegionPipeline:
     """Layout -> crop -> route -> recognize -> Page IR, with no hidden hooks."""
 
     def __init__(
         self,
         backend: Backend,
-        config: ExplicitParserConfig | None = None,
-        *,
-        table_gate: Any = None,
+        config: ParserConfig | None = None,
     ) -> None:
         self.backend = backend
-        self.config = config or ExplicitParserConfig()
+        self.config = config or ParserConfig()
         self.gate = VisualGate(self.config.gate)
-        self.table_gate = table_gate
 
     def parse_image(
         self,
@@ -422,11 +433,6 @@ class ExplicitRegionParser:
             self.backend.recognize_text,
             self.backend.recognize_vlm,
             gate=self.gate,
-            table_gate=self.table_gate,
-            recognize_table=(
-                getattr(self.backend, "recognize_table", None)
-                if self.table_gate is not None else None
-            ),
         )
         outputs: dict[tuple[int, int], dict] = {}
         for group in groups.values():
@@ -526,7 +532,7 @@ def write_page_result(
     output: str | Path,
     result: PageParseResult,
     *,
-    config: ExplicitParserConfig = ExplicitParserConfig(),
+    config: ParserConfig = ParserConfig(),
 ) -> None:
     """Write portable page artifacts after assets have been saved."""
     root = Path(output)
@@ -538,7 +544,7 @@ def write_page_result(
     (root / "page.md").write_text(result.markdown, encoding="utf-8")
     (root / "page_result.json").write_text(
         json.dumps({
-            "schema_version": "explicit-page.v1",
+            "schema_version": "page-result.v2",
             "pipeline": PIPELINE_VERSION,
             "page": result.page.to_dict() if hasattr(result.page, "to_dict") else asdict(result.page),
             "routes": result.records,
