@@ -5,18 +5,17 @@ import hashlib
 import json
 import mimetypes
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import shutil
 import subprocess
-import tarfile
 import tempfile
 import zipfile
+
+from .archive_security import iter_archive_documents_safely
 
 
 SCHEMA_VERSION = "page-package.v1"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".gif", ".webp"}
-MAX_ARCHIVE_MEMBERS = 10000
-MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -235,82 +234,112 @@ def _render_image(path: Path, pages_dir: Path, max_pages: int | None = None) -> 
     return result
 
 
-def _safe_archive_name(name: str) -> Path:
-    pure = PurePosixPath(name.replace("\\", "/"))
-    if pure.is_absolute() or any(part in {"..", ""} for part in pure.parts):
-        raise ValueError(f"Unsafe archive member: {name}")
-    return Path(*pure.parts)
-
-
-def _extract_archive(path: Path, destination: Path) -> list[Path]:
-    destination.mkdir(parents=True, exist_ok=True)
-    if zipfile.is_zipfile(path):
-        with zipfile.ZipFile(path) as archive:
-            entries = [item for item in archive.infolist() if not item.is_dir()]
-            if len(entries) > MAX_ARCHIVE_MEMBERS or sum(item.file_size for item in entries) > MAX_ARCHIVE_BYTES:
-                raise ValueError("Archive exceeds extraction limits")
-            for item in entries:
-                mode = item.external_attr >> 16
-                if mode & 0o170000 == 0o120000:
-                    raise ValueError(f"Archive contains a symbolic link: {item.filename}")
-                target = destination / _safe_archive_name(item.filename)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(item) as src, target.open("wb") as dst:
-                    shutil.copyfileobj(src, dst)
-        return [destination / _safe_archive_name(item.filename) for item in entries]
-    if tarfile.is_tarfile(path):
-        with tarfile.open(path, "r:*") as archive:
-            entries = [item for item in archive.getmembers() if item.isfile()]
-            if len(entries) > MAX_ARCHIVE_MEMBERS or sum(item.size for item in entries) > MAX_ARCHIVE_BYTES:
-                raise ValueError("Archive exceeds extraction limits")
-            for item in entries:
-                target = destination / _safe_archive_name(item.name)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                src = archive.extractfile(item)
-                if src is None:
-                    continue
-                with src, target.open("wb") as dst:
-                    shutil.copyfileobj(src, dst)
-        return [destination / _safe_archive_name(item.name) for item in entries]
-    raise RuntimeError(f"Archive type {path.suffix.lower()} needs an external extractor")
-
-
 def prepare_document(source: str | Path, output: str | Path, *, dpi: int = 150,
-                     office_converter: str | None = None, max_pages: int | None = None,
-                     _depth: int = 0, _page_budget: list[int] | None = None) -> dict:
-    """Create native artifacts and stable per-page packages without running models."""
+                     office_converter: str | None = None, max_pages: int | None = None) -> dict:
+    """预处理单个文档，或以惰性 BFS 展开并处理压缩包成员。"""
+    source_path = Path(source).resolve()
+    kind = detect_format(source_path)
+    if kind in {"zip", "tar"}:
+        return _prepare_archive(
+            source_path, output, kind=kind, dpi=dpi,
+            office_converter=office_converter, max_pages=max_pages,
+        )
+    return _prepare_leaf(
+        source_path, output, dpi=dpi,
+        office_converter=office_converter, max_pages=max_pages,
+    )
+
+
+def _prepare_archive(source: Path, output: str | Path, *, kind: str, dpi: int,
+                     office_converter: str | None, max_pages: int | None) -> dict:
+    output = Path(output).resolve()
+    if output.exists() and any(output.iterdir()):
+        raise ValueError("Output directory must be empty; use a new job directory")
+    output.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "source_name": source.name,
+        "source_sha256": _sha256(source),
+        "detected_format": kind,
+        "mime_type": mimetypes.guess_type(source.name)[0],
+        "status": "success",
+        "expansion": "breadth_first_streaming",
+        "document_count": 0,
+        "documents": [],
+    }
+    remaining_pages = max_pages
+    ignored_suffixes = {".ini", ".db", ".ds_store"}
+    try:
+        expanded = iter_archive_documents_safely(
+            source, output / "_extracted", classify=detect_format,
+        )
+        for item in expanded:
+            if Path(item.relative_path).suffix.lower() in ignored_suffixes:
+                continue
+            index = len(manifest["documents"]) + 1
+            leaf_name = Path(item.relative_path).stem or "document"
+            child_output = output / "documents" / f"{index:04d}-{leaf_name}"
+            summary = {
+                "path": child_output.relative_to(output).as_posix(),
+                "source_path": item.source_path,
+                "archive_path": item.archive_path,
+                "relative_path": item.relative_path,
+            }
+            try:
+                document_key = "archive_" + hashlib.sha256(
+                    item.source_path.encode("utf-8"),
+                ).hexdigest()[:16]
+                child = _prepare_leaf(
+                    item.path, child_output, dpi=dpi, office_converter=office_converter,
+                    max_pages=remaining_pages, document_key=document_key,
+                    source_name=item.source_path, archive_path=item.archive_path,
+                )
+                if remaining_pages is not None:
+                    remaining_pages -= child["page_count"]
+                summary.update({
+                    "status": "success",
+                    "document_id": document_key,
+                    "source_sha256": child["source_sha256"],
+                    "detected_format": child["detected_format"],
+                    "page_count": child["page_count"],
+                })
+            except (ValueError, RuntimeError) as exc:
+                summary.update({"status": "unsupported", "error": str(exc)})
+                _write_json(child_output / "manifest.json", summary)
+            manifest["documents"].append(summary)
+        manifest["document_count"] = len(manifest["documents"])
+        manifest["counts"] = {
+            status: sum(item["status"] == status for item in manifest["documents"])
+            for status in ("success", "unsupported")
+        }
+        _write_json(output / "manifest.json", manifest)
+        return manifest
+    except Exception as exc:
+        manifest.update(status="failed", error_type=type(exc).__name__, error=str(exc))
+        _write_json(output / "manifest.json", manifest)
+        raise
+
+
+def _prepare_leaf(source: str | Path, output: str | Path, *, dpi: int = 150,
+                  office_converter: str | None = None, max_pages: int | None = None,
+                  document_key: str | None = None, source_name: str | None = None,
+                  archive_path: str | None = None) -> dict:
+    """Create native artifacts and stable page packages for one non-archive file."""
     source, output = Path(source).resolve(), Path(output).resolve()
-    if _depth > 4:
-        raise ValueError("Archive nesting exceeds four levels")
-    if _page_budget is None and max_pages is not None:
-        _page_budget = [max_pages]
     if not source.is_file():
         raise FileNotFoundError(source)
     if output.exists() and any(output.iterdir()):
         raise ValueError("Output directory must be empty; use a new job directory")
     output.mkdir(parents=True, exist_ok=True)
     kind = detect_format(source)
-    manifest = {"schema_version": SCHEMA_VERSION, "source_name": source.name,
+    manifest = {"schema_version": SCHEMA_VERSION, "source_name": source_name or source.name,
                 "source_sha256": _sha256(source), "detected_format": kind,
                 "mime_type": mimetypes.guess_type(source.name)[0], "status": "success",
-                "page_count": 0, "pages": [], "children": []}
+                "page_count": 0, "pages": []}
+    if archive_path is not None:
+        manifest["archive_path"] = archive_path
     try:
-        if kind in {"zip", "tar"}:
-            extracted = _extract_archive(source, output / "children" / "_extracted")
-            for index, child in enumerate(extracted, 1):
-                if child.suffix.lower() in {".ini", ".db", ".ds_store"}:
-                    continue
-                child_output = output / "children" / f"{index:04d}-{child.stem}"
-                try:
-                    child_manifest = prepare_document(child, child_output, dpi=dpi,
-                                                      office_converter=office_converter, max_pages=max_pages,
-                                                      _depth=_depth + 1, _page_budget=_page_budget)
-                except (ValueError, RuntimeError) as exc:
-                    child_manifest = {"source_name": child.name, "status": "unsupported", "error": str(exc)}
-                    _write_json(child_output / "manifest.json", child_manifest)
-                manifest["children"].append({"path": child_output.relative_to(output).as_posix(),
-                                             "source_name": child.name, "status": child_manifest["status"]})
-        elif kind in {"txt", "text", "json"}:
+        if kind in {"txt", "text", "json"}:
             native = _extract_native(source, kind)
             _write_json(output / "native" / "objects.json", native)
             manifest["native_only"] = True
@@ -325,10 +354,9 @@ def prepare_document(source: str | Path, output: str | Path, *, dpi: int = 150,
                     pdf_for_pages = _render_office(source, Path(temp_dir), office_converter)
                     office_generated = True
                 if kind == "pdf" or office_generated or kind in {"doc", "ppt", "xls"}:
-                    rendered = _render_pdf(pdf_for_pages, output / "pages", dpi,
-                                           max_pages=_page_budget[0] if _page_budget is not None else None)
-                    if _page_budget is not None:
-                        _page_budget[0] -= len(rendered)
+                    rendered = _render_pdf(
+                        pdf_for_pages, output / "pages", dpi, max_pages=max_pages,
+                    )
                     scale = dpi / 72.0
                     for page in rendered:
                         native_blocks = (_office_visible_blocks(pdf_for_pages, page["page_no"] - 1, scale)
@@ -336,7 +364,7 @@ def prepare_document(source: str | Path, output: str | Path, *, dpi: int = 150,
                         page_no = page["page_no"]
                         page_id = f"p{page_no:04d}"
                         relative_image = page["path"].relative_to(output).as_posix()
-                        package = {"schema_version": SCHEMA_VERSION, "document_id": source.stem,
+                        package = {"schema_version": SCHEMA_VERSION, "document_id": document_key or source.stem,
                                    "page_id": page_id, "page_no": page_no,
                                    "image": {"path": relative_image, "width": page["width"],
                                              "height": page["height"], "dpi": dpi,
@@ -356,15 +384,14 @@ def prepare_document(source: str | Path, output: str | Path, *, dpi: int = 150,
                                                   "package": (page_dir / "page.json").relative_to(output).as_posix(),
                                                   "native_block_count": len(native_blocks)})
                 elif kind == "image":
-                    rendered = _render_image(source, output / "pages",
-                                             max_pages=_page_budget[0] if _page_budget is not None else None)
-                    if _page_budget is not None:
-                        _page_budget[0] -= len(rendered)
+                    rendered = _render_image(
+                        source, output / "pages", max_pages=max_pages,
+                    )
                     for page in rendered:
                         page_no = page["page_no"]
                         page_id = f"p{page_no:04d}"
                         relative_image = page["path"].relative_to(output).as_posix()
-                        package = {"schema_version": SCHEMA_VERSION, "document_id": source.stem,
+                        package = {"schema_version": SCHEMA_VERSION, "document_id": document_key or source.stem,
                                    "page_id": page_id, "page_no": page_no,
                                    "image": {"path": relative_image, "width": page["width"],
                                              "height": page["height"], "dpi": None,

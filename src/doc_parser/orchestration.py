@@ -88,7 +88,7 @@ def _native_pages(
     source_path: str,
     starting_page_no: int,
 ) -> list[Page]:
-    """Turn native-only children into real IR pages instead of an empty shell."""
+    """Turn native-only documents into real IR pages instead of an empty shell."""
     pages = []
     for objects_path in sorted(prepared_root.rglob("native/objects.json")):
         package_root = objects_path.parent.parent
