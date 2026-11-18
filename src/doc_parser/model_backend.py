@@ -23,7 +23,6 @@ def _set_model_environment(root: Path) -> None:
     os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(root / ".cache" / "paddlex"))
     os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
     os.environ.setdefault("HF_HOME", str(root / ".cache" / "huggingface-paddleocr"))
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 
 def _read_response(stream: Any, timeout: float) -> dict:
@@ -80,20 +79,21 @@ class PaddleModelBackend:
             import paddlex
 
             layout_dir = Path(layout_model_dir) if layout_model_dir else self.root / "models" / "PP-DocLayoutV3_safetensors"
-            vlm_dir = Path(vlm_model_dir) if vlm_model_dir else self.root / "models" / "PaddleOCR-VL-1.6"
+            vlm_dir = Path(vlm_model_dir) if vlm_model_dir else Path("models") / "PaddleOCR-VL-1.6"
             layout_device = os.environ.get("PADDLEOCR_LAYOUT_DEVICE", os.environ.get("PADDLEOCR_VLM_DEVICE", "gpu:0"))
             vlm_device = os.environ.get("PADDLEOCR_VLM_DEVICE", "gpu:0")
             self.layout_model = paddlex.create_model(
                 model_name=layout_model_name,
                 model_dir=str(layout_dir),
                 device=layout_device,
+                engine="paddle_dynamic",
                 batch_size=1,
             )
             self.vlm_model = paddlex.create_model(
                 model_name=vlm_model_name,
                 model_dir=str(vlm_dir),
                 device=vlm_device,
-                engine=os.environ.get("PADDLEOCR_VLM_ENGINE", "transformers"),
+                engine=os.environ.get("PADDLEOCR_VLM_ENGINE", "paddle_dynamic"),
                 batch_size=1,
             )
             self.worker = subprocess.Popen(

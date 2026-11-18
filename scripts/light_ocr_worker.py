@@ -70,8 +70,8 @@ def build_model(project: Path):
         "text_recognition_batch_size": int(os.environ.get("PADDLEOCR_REC_BATCH", "6")),
     }
     # 目录存在时使用本地权重；否则交给 PaddleOCR 的公开模型解析逻辑。
-    det_dir = Path(os.environ.get("PADDLEOCR_TEXT_DET_MODEL_DIR", project / "models" / det_name))
-    rec_dir = Path(os.environ.get("PADDLEOCR_TEXT_REC_MODEL_DIR", project / "models" / rec_name))
+    det_dir = Path(os.environ.get("PADDLEOCR_TEXT_DET_MODEL_DIR", Path("models") / det_name))
+    rec_dir = Path(os.environ.get("PADDLEOCR_TEXT_REC_MODEL_DIR", Path("models") / rec_name))
     if det_dir.is_dir():
         kwargs["text_detection_model_dir"] = str(det_dir)
     if rec_dir.is_dir():

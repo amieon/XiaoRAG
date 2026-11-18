@@ -1,3 +1,12 @@
+# 先安装 PaddlePaddle GPU；Windows/CUDA 12.9 冒烟环境使用：
+# python -m pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
+# Torch 仅用于图像预处理，必须安装 CPU 版，避免与 Paddle 同进程加载 CUDA/cuDNN：
+# python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
 -r requirements.txt
-paddleocr==3.7.0
+numpy>=1.24,<2.4
+paddleocr[doc-parser]==3.7.0
 paddlex==3.7.2
+transformers
+safetensors
+sentencepiece
