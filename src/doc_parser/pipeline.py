@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from .document_ir import Block, DocumentIR, Page, SourceRef
+from .reading_order import ReadingOrderConfig, restore_page_reading_order
 from .routing import (
     GateConfig,
     VisualGate,
@@ -40,6 +41,7 @@ class ParserConfig:
     """可审计的识别、路由与并行配置。"""
 
     gate: GateConfig = field(default_factory=GateConfig)
+    reading_order: ReadingOrderConfig = field(default_factory=ReadingOrderConfig)
     min_layout_box_side: float = 6.0
     native_min_coverage: float = 0.9
     max_new_tokens: int = 4096
@@ -97,6 +99,8 @@ class ParserConfig:
         data = dict(value)
         if "gate" in data:
             data["gate"] = GateConfig(**dict(data["gate"]))
+        if "reading_order" in data:
+            data["reading_order"] = ReadingOrderConfig.from_dict(dict(data["reading_order"]))
         for key in (
             "drop_layout_labels", "figure_labels", "markdown_ignore_labels",
             "ocr_pixel_limits", "table_pixel_limits", "formula_pixel_limits",
@@ -515,6 +519,7 @@ class RegionPipeline:
                 ),
             },
         )
+        restore_page_reading_order(page, self.config.reading_order)
         page.validate()
         records.sort(key=lambda item: (item.get("page_id", 0), item.get("block_id", [0, 0])[1]))
         result = PageParseResult(

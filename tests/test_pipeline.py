@@ -161,6 +161,27 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result.page.blocks[0].source.engine, "native_text")
         self.assertEqual(result.records[0]["engine"], "native_text")
 
+    def test_pipeline_recovers_two_column_order_instead_of_using_detector_order(self):
+        backend = FakeBackend([
+            {"label": "text", "coordinate": [90, 10, 150, 25]},
+            {"label": "text", "coordinate": [10, 10, 70, 25]},
+            {"label": "text", "coordinate": [10, 35, 70, 50]},
+            {"label": "text", "coordinate": [90, 35, 150, 50]},
+        ])
+        result = RegionPipeline(backend).parse_image(
+            self.image_path, document_id="doc_columns", page_no=1,
+        )
+        ordered = sorted(result.page.blocks, key=lambda block: block.reading_order)
+        self.assertEqual(
+            [block.source.extra["region_index"] for block in ordered],
+            [1, 2, 0, 3],
+        )
+        self.assertEqual(result.page.metadata["reading_order"]["status"], "confirmed")
+        self.assertEqual(
+            [block.metadata["layout_reading_order"] for block in result.page.blocks],
+            [0, 1, 2, 3],
+        )
+
     def test_config_round_trip_and_threshold_override(self):
         config = ParserConfig.from_dict({
             "gate": {"formula_overlap_threshold": 0.3},
