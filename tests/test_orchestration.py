@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 import sys
@@ -8,6 +9,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+import zipfile
 
 import numpy as np
 from PIL import Image
@@ -120,6 +122,35 @@ class OrchestrationTests(unittest.TestCase):
             knowledge_unit_root = output / "documents" / relative / "results/knowledge-units"
             self.assertTrue((knowledge_unit_root / "knowledge-units.jsonl").is_file())
             self.assertTrue((knowledge_unit_root / "element-locations.jsonl").is_file())
+
+    def test_nested_archive_has_flat_provenance_and_real_ir(self):
+        inner = io.BytesIO()
+        with zipfile.ZipFile(inner, "w") as archive:
+            archive.writestr("b.txt", "nested text")
+        source = self.inputs / "bundle.zip"
+        with zipfile.ZipFile(source, "w") as archive:
+            archive.writestr("a.txt", "outer text")
+            archive.writestr("inner.zip", inner.getvalue())
+        output = self.root / "archive-out"
+
+        manifest = run_path(source, output, prepare_only=True, build_knowledge_units=True)
+
+        self.assertEqual(manifest["native_page_count"], 2)
+        self.assertEqual(manifest["knowledge_units"]["indexable_unit_count"], 2)
+        prepared = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(prepared["document_count"], 2)
+        self.assertNotIn("children", prepared)
+        self.assertEqual(
+            [item["source_path"] for item in prepared["documents"]],
+            ["bundle.zip/a.txt", "bundle.zip/inner.zip/b.txt"],
+        )
+        document = DocumentIR.from_dict(json.loads(
+            (output / "results/document.json").read_text(encoding="utf-8")
+        ))
+        self.assertEqual(
+            [page.blocks[0].text for page in document.pages],
+            ["outer text", "nested text"],
+        )
 
     def test_native_ir_builds_knowledge_units_in_same_run(self):
         source = self.inputs / "native.txt"

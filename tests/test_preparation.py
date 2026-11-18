@@ -54,15 +54,30 @@ class PreparationTests(unittest.TestCase):
                 prepare_document(source, root / "out", max_pages=1)
             self.assertFalse((root / "out/pages/0001.png").exists())
 
-    def test_zip_dispatches_children_and_rejects_traversal(self):
+    def test_nested_zip_uses_bfs_flat_documents_and_rejects_traversal(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            inner_buffer = root / "inner.zip"
+            with zipfile.ZipFile(inner_buffer, "w") as archive:
+                archive.writestr("docs/inside.txt", "nested")
             source = root / "bundle.zip"
             with zipfile.ZipFile(source, "w") as archive:
                 archive.writestr("readme.txt", "contained")
+                archive.writestr("nested/inner.zip", inner_buffer.read_bytes())
             self.assertEqual(detect_format(source), "zip")
             manifest = prepare_document(source, root / "out")
-            self.assertEqual(manifest["children"][0]["status"], "success")
+            self.assertEqual(manifest["expansion"], "breadth_first_streaming")
+            self.assertEqual(manifest["document_count"], 2)
+            self.assertNotIn("children", manifest)
+            self.assertEqual(
+                [item["source_path"] for item in manifest["documents"]],
+                ["bundle.zip/readme.txt", "bundle.zip/nested/inner.zip/docs/inside.txt"],
+            )
+            self.assertEqual(
+                manifest["documents"][1]["archive_path"],
+                "bundle.zip/nested/inner.zip",
+            )
+            self.assertFalse((root / "out/documents").joinpath("0002-inside/children").exists())
             malicious = root / "bad.zip"
             with zipfile.ZipFile(malicious, "w") as archive:
                 archive.writestr("../outside.txt", "bad")
