@@ -1,0 +1,14 @@
+{
+  "schema_version": "chunk-preprocess-config.v1",
+  "preprocess": {
+    "strip_furniture": true,
+    "strip_toc": true,
+    "merge_cross_page": true
+  },
+  "formats": {
+    "slide_merge_below_chars": 0,
+    "slide_merge_max_chars": 800,
+    "excel_rows_per_group": 10,
+    "excel_header_mode": "first_candidate"
+  }
+}
