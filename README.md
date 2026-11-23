@@ -12,6 +12,10 @@ DocumentIR → 知识单元构建（语义树、知识单元、证据定位） �
 ## 代码结构
 
 ```text
+src/chapter_tree/
+  reading_order.py        # 保留上游区域顺序并生成审计元数据，不做坐标重排
+  context.py              # 构造前后 crop 原文窗口
+  heading_classifier.py   # heading/body 数据链、Transformer 微调与推理
 src/doc_parser/
   preparation.py          # 格式识别、原生抽取、Office/PDF/图片页包
   archive_security.py     # 压缩包安全边界、惰性 BFS 展开与来源链
@@ -28,6 +32,8 @@ scripts/
   build_knowledge_units.py     # 已有 DocumentIR 的独立/批量知识单元 CLI
   light_ocr_worker.py          # 常驻轻量 OCR 子进程
   benchmark_parser.py          # 预热、重复计时、源码快照与实验清单
+  train_heading_classifier.py  # 按文档划分数据并微调标题二分类器
+  classify_headings.py         # 离线预测 heading/body，不改写原始 IR
 config/
   parser.json             # 路由、识别和并行参数
   knowledge_units.json    # 知识单元切分与复核参数
@@ -77,6 +83,33 @@ models/PP-OCRv6_small_rec
 全部 crop 识别完成后，每个 `routes.jsonl` 记录及对应 IR 块的 `metadata.context` 都会保存同页的 `previous`、`next` 上下文。每项包含邻块 `block_id`、区域序号、原始布局标签、识别原文、字符区间、完整长度和截断标志；页首的前文、页尾的后文为 `null`，不跨页拼接。当前块文本仍使用原有 `result/text`，不在上下文里重复保存。
 
 默认每侧最多保留 300 个 Unicode 字符，前一块取末尾、后一块取开头，可通过 `config/parser.json` 的 `crop_context_chars` 调整。截断只影响内嵌上下文窗口，不修改 IR 正文；下游可凭 `block_id` 回查完整邻块。
+
+## 标题／正文二分类
+
+`chapter_tree.heading_classifier` 使用预训练 Transformer 做 `heading/body` 二分类，不直接恢复标题层级。模型输入为“当前块＋前一块＋后一块”，当前块置首以避免被右侧截断。它必须加载微调后的模型目录；没有训练产物时会明确失败，不会用随机初始化分类头生成结果。
+
+人工标签独立保存为 JSONL，每行一个块。`label` 可直接写 `heading/body`，也兼容 `section_heading/document_title/paragraph/text` 等等价名称：
+
+```jsonl
+{"block_id":"doc_xxx_p0001_b0000","label":"heading"}
+{"block_id":"doc_xxx_p0001_b0001","label":"body"}
+```
+
+从解析结果训练，输出必须是新目录：
+
+```bat
+.venv\Scripts\python.exe scripts\train_heading_classifier.py --input var\parsed --labels datasets\heading-labels.jsonl --output var\heading-model-exp01 --base-model hfl/chinese-roberta-wwm-ext --epochs 3 --batch-size 8
+```
+
+训练与验证按文档隔离；单文档数据会全部用于训练且没有验证集，不能据此报告泛化精度。训练环境需要 PyTorch、Transformers 和 safetensors，建议与 PaddleOCR 推理环境分开，按本机 CUDA 版本安装 PyTorch。`training_summary.json` 保存超参数、文档划分、类别权重及每轮标题类 F1／混淆矩阵。
+
+离线预测生成独立 JSONL，不覆盖 IR：
+
+```bat
+.venv\Scripts\python.exe scripts\classify_headings.py --input var\parsed --model var\heading-model-exp01 --output var\heading-predictions-exp01.jsonl
+```
+
+上游 `raw_label` 可以辅助预标注，但若直接把它当全部真值，模型最多学习复现上游判断；要纠正标题误判，仍需人工复核和独立测试文档。
 
 ## 从已有 DocumentIR 离线生成知识单元
 

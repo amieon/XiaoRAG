@@ -11,6 +11,9 @@ import math
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
+from chapter_tree.context import build_crop_context
+from chapter_tree.reading_order import upstream_reading_order_metadata
+
 from .document_ir import Block, DocumentIR, Page, SourceRef
 from .routing import (
     GateConfig,
@@ -368,46 +371,6 @@ def _layout_only_record(region: PageRegion, page_index: int) -> dict[str, Any]:
     }
 
 
-def _crop_context(
-    regions: list[PageRegion],
-    texts: list[str],
-    position: int,
-    *,
-    page_id: str,
-    max_chars: int,
-) -> dict[str, Any]:
-    """保存相邻 crop 的识别原文窗口；前文取后缀，后文取前缀。"""
-    def neighbor(neighbor_position: int, side: str) -> dict[str, Any] | None:
-        if not 0 <= neighbor_position < len(regions):
-            return None
-        region = regions[neighbor_position]
-        text = texts[neighbor_position]
-        full_length = len(text)
-        if side == "previous":
-            start, end = max(0, full_length - max_chars), full_length
-        else:
-            start, end = 0, min(full_length, max_chars)
-        return {
-            "block_id": f"{page_id}_b{region.index:04d}",
-            "region_index": region.index,
-            "raw_label": region.label,
-            "text": text[start:end],
-            "char_start": start,
-            "char_end": end,
-            "full_length": full_length,
-            "truncated": end - start < full_length,
-        }
-
-    return {
-        "schema_version": "crop-context.v1",
-        "scope": "page",
-        "order_source": "layout_region_order",
-        "max_chars_per_side": max_chars,
-        "previous": neighbor(position - 1, "previous"),
-        "next": neighbor(position + 1, "next"),
-    }
-
-
 def render_markdown(page: Page, config: ParserConfig) -> str:
     """Deterministic human-facing export; DocumentIR remains the primary output."""
     chunks: list[str] = []
@@ -506,7 +469,7 @@ class RegionPipeline:
                 route = _layout_only_record(region, page_index)
                 records.append(route)
             result = outputs.get(key, {})
-            context = _crop_context(
+            context = build_crop_context(
                 regions, region_texts, position,
                 page_id=page_id, max_chars=self.config.crop_context_chars,
             )
@@ -566,13 +529,9 @@ class RegionPipeline:
             metadata={
                 "pipeline": PIPELINE_VERSION,
                 "layout_region_count": len(regions),
-                "reading_order": {
-                    "status": "model_provided",
-                    "source": "layout_region_order",
-                    "ordered_block_ids": [
-                        f"{page_id}_b{region.index:04d}" for region in regions
-                    ],
-                },
+                "reading_order": upstream_reading_order_metadata(
+                    regions, page_id=page_id,
+                ),
                 "recognized_region_count": len(groups) and sum(
                     len(group["images"]) for group in groups.values()
                 ),

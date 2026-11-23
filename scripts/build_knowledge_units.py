@@ -23,7 +23,7 @@ if str(SRC) not in sys.path:
 
 from doc_parser.knowledge_units import KnowledgeUnitConfig, build_knowledge_units_from_json
 
-IGNORED_DIRECTORIES = {".git", ".svn", ".venv", ".idea", "__pycache__", "node_modules"}
+IGNORED_DIRECTORIES = {".git", ".svn", ".venv", "__pycache__", "node_modules"}
 
 
 def _write_json(path: Path, value) -> None:
