@@ -221,6 +221,7 @@ def attach_native_text(metadata, native_blocks, minimum_coverage=0.9):
         item["native_text"] = None
         item["native_block_ids"] = []
         item["native_structures"] = []
+        item["list_structures"] = []
         box = item.get("box")
         if not box or len(box) != 4:
             continue
@@ -244,5 +245,9 @@ def attach_native_text(metadata, native_blocks, minimum_coverage=0.9):
             item["native_structures"] = [
                 block["native_structure"] for block in matched
                 if isinstance(block.get("native_structure"), dict)
+            ]
+            item["list_structures"] = [
+                block["list_structure"] for block in matched
+                if isinstance(block.get("list_structure"), dict)
             ]
 

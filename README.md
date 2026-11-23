@@ -17,8 +17,14 @@ src/chapter_tree/
   context.py              # 构造前后 crop 原文窗口
   heading_classifier.py   # heading/body 数据链、Transformer 微调与推理
   native_classifier.py    # 完全信任 DOCX 原生标题证据的无模型模式
+  tree.py                 # 原生／上游标题与显式编号构建确定性章节树
+  groups.py               # 章节树转两层父子分块可消费的 flat groups
+src/doc_chunking/
+  engine.py               # 章节树 groups → parent/child，列表与条款约束子块
+  validation.py           # 父子关系、正文切片、来源与字符区间硬校验
 src/doc_parser/
   preparation.py          # 格式识别、原生抽取、Office/PDF/图片页包
+  docx_numbering.py       # OOXML 自动编号列表、层级与序号提取
   archive_security.py     # 压缩包安全边界、惰性 BFS 展开与来源链
   pipeline.py             # 区域对象、识别编排、crop 上下文、DocumentIR 与 Markdown 导出
   routing.py              # native/light/VLM 分流与审计记录
@@ -35,6 +41,8 @@ scripts/
   benchmark_parser.py          # 预热、重复计时、源码快照与实验清单
   train_heading_classifier.py  # 按文档划分数据并微调标题二分类器
   classify_headings.py         # 离线预测 heading/body，不改写原始 IR
+  build_chapter_tree.py        # DocumentIR 独立构建章节树和结构 groups
+  build_chunks.py              # 生成 structural-chunk.v1 两层父子块并硬校验
 config/
   parser.json             # 路由、识别和并行参数
   knowledge_units.json    # 知识单元切分与复核参数
@@ -87,12 +95,14 @@ models/PP-OCRv6_small_rec
 
 ## 标题／正文二分类
 
-标题／正文判定支持两种显式模式，不直接恢复完整章节树：
+标题／正文判定支持两种显式模式；分类器只输出判定，章节树由独立构建步骤恢复：
 
 - `native`（默认）：完全信任 DOCX 的显式 Heading／Title 样式和 OOXML 大纲级别，有原生标题证据则为 `heading`，否则为 `body`。不加载模型，`confidence/scores` 为 `null`，不伪造概率。
 - `transformer`：加载微调后的预训练 Transformer。模型输入为“当前块＋前一块＋后一块”，当前块置首以避免被右侧截断；没有训练产物时会明确失败，不会用随机初始化分类头生成结果。
 
 DOCX 预处理会把原生标题证据保存到 `native/objects.json` 的 `structure`，再与 LibreOffice 渲染后的原生文本块对齐。只有规范化全文相同且匹配唯一时才传递证据；重复标题文本会标记 `ambiguous_exact_text`，不会任选一个。该证据随后进入 crop 的 `metadata.native_structures`。因此 native 模式是“信任已明确对齐的原生结构”，不是根据短文本或字体猜标题；未对齐的块按正文处理。
+
+DOCX 自动编号列表另从 OOXML `numPr/numbering.xml` 提取，保存到 `lists` 和 crop 的 `metadata.list_structures`，包括文档内 `num_id`、层级、序号、编号格式和渲染前缀。自动编号段落不会被编号标题规则提升为章节；`num_id` 只用于当前文档，不作为跨版本稳定身份。标题样式与列表编号同时存在时，标题角色优先。
 
 人工标签独立保存为 JSONL，每行一个块。`label` 可直接写 `heading/body`，也兼容 `section_heading/document_title/paragraph/text` 等等价名称：
 
@@ -122,6 +132,30 @@ DOCX 预处理会把原生标题证据保存到 `native/objects.json` 的 `struc
 ```
 
 上游 `raw_label` 可以辅助预标注，但若直接把它当全部真值，模型最多学习复现上游判断；要纠正标题误判，仍需人工复核和独立测试文档。
+
+## 确定性章节树与结构 groups
+
+章节树按 `page_no/reading_order` 的物理顺序构建，不用坐标二次排序，也不把树遍历顺序当成正文顺序。标题证据优先级为原生 DOCX 结构、可选 Transformer 预测、上游布局标题；普通段落中的显式“第一章／1.1”编号可保守补充层级。列表、表格、公式和带句末标点的编号正文不会被编号规则提升为标题。完全没有标题时保留根节点下平铺，层级跳跃只记录警告，不伪造缺失章节。
+
+```bat
+.venv\Scripts\python.exe scripts\build_chapter_tree.py --input "var\parsed\results\document.json" --output "var\chapter-tree-exp01" --mode native
+.venv\Scripts\python.exe scripts\build_chapter_tree.py --input "var\parsed\results\document.json" --output "var\chapter-tree-exp02" --mode hybrid --predictions "var\heading-predictions-exp01.jsonl"
+```
+
+`--mode native` 只信任原生标题；`upstream` 使用上游标签和显式编号；`hybrid` 合并三类证据。输出目录必须为空，且不修改 `document.json`。每份输出包含：
+
+- `chapter-tree.json`：`chapter-tree.v1`，保存任意深度节点、标题路径、块归属、判定来源、层级跳跃警告和覆盖自检。
+- `chapter-groups.json`：`chapter-groups.v1`，保存 `strategy=chapter_tree` 的扁平结构 groups。空祖先标题并入首个有正文的后代，尾部纯标题保留为显式 heading-only group；每个输入块恰好覆盖一次。后续长度切分仍只生成 parent/child 两层，不增加孙块。
+
+## 章节树生成两层父子块
+
+普通文档不再对整篇执行 `clause/section/item/paragraph` 四选一：章节树决定 group 和完整 parent，child 默认按 800／1600 Unicode 字符软预算组合。DOCX 自动列表项及显式续段、表格、公式和代码作为原子单元；明确的“第一条／第二条”只作为 child 的优先边界和 `clause_path`，不额外伪造章节或 parent。章节标题会跟随其下第一个条款，不单独形成标题 child。
+
+```bat
+.venv\Scripts\python.exe scripts\build_chunks.py --input "var\parsed\results\document.json" --output "var\chunks-exp01" --mode native
+```
+
+输出 `chunks.jsonl`（全部 parent 在前、child 在后）、`chapter-tree.json`、`preprocessing.json`、`decision.json` 和 `self_check.json`。每个 group 必定有一个 parent 和至少一个 child；短组父子正文相同是正常行为。校验器会检查正文切片无缝无重叠、父子成员、来源定位、字符区间和 JSON Pointer。PPT／Excel 继续走显式格式通道，不套章节树。
 
 ## 从已有 DocumentIR 离线生成知识单元
 

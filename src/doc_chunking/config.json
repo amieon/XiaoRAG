@@ -10,5 +10,12 @@
     "slide_merge_max_chars": 800,
     "excel_rows_per_group": 10,
     "excel_header_mode": "first_candidate"
-  }
+  },
+  "sizing": {
+    "length_unit": "unicode_codepoints",
+    "target_chars": 800,
+    "max_chars": 1600,
+    "overlap": 0
+  },
+  "clause_boundaries": true
 }
