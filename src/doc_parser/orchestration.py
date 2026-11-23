@@ -25,7 +25,7 @@ from .runtime_pool import PageRuntimePool, resolve_cpu_workers
 
 
 BATCH_SCHEMA_VERSION = "document-folder-batch.v2"
-IGNORED_DIRECTORIES = {".git", ".svn", ".venv", "__pycache__", "node_modules"}
+IGNORED_DIRECTORIES = {".git", ".svn", ".venv", ".idea", "__pycache__", "node_modules"}
 IGNORED_FILES = {".ds_store", "thumbs.db", "desktop.ini"}
 
 

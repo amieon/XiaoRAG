@@ -6,6 +6,7 @@ import json
 import mimetypes
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -71,6 +72,43 @@ def detect_format(path: str | Path) -> str:
     raise ValueError(f"Unsupported input format: {source.suffix or '(no extension)'}")
 
 
+def _docx_native_heading(paragraph, native_id: str) -> dict | None:
+    """只接受 OOXML 大纲级别或显式 Heading/Title 样式，不猜字体和短文本。"""
+    from docx.oxml.ns import qn
+
+    style_name = str(paragraph.style.name if paragraph.style is not None else "")
+    for owner, source in ((paragraph, "docx_outline"), (paragraph.style, "docx_style_outline")):
+        properties = getattr(getattr(owner, "_p", None), "pPr", None)
+        if properties is None:
+            properties = getattr(getattr(owner, "element", None), "pPr", None)
+        outline = properties.find(qn("w:outlineLvl")) if properties is not None else None
+        if outline is not None:
+            try:
+                level = int(outline.get(qn("w:val"))) + 1
+            except (TypeError, ValueError):
+                continue
+            if 1 <= level <= 9:
+                return {
+                    "source": source, "role": "heading", "heading_level": level,
+                    "style_name": style_name, "native_id": native_id,
+                    "text": paragraph.text,
+                }
+    normalized = style_name.strip().casefold()
+    match = re.fullmatch(r"(?:heading|标题)\s*([1-9])", normalized)
+    if match:
+        return {
+            "source": "docx_style", "role": "heading",
+            "heading_level": int(match.group(1)), "style_name": style_name,
+            "native_id": native_id, "text": paragraph.text,
+        }
+    if normalized in {"title", "标题"}:
+        return {
+            "source": "docx_style", "role": "document_title", "heading_level": 1,
+            "style_name": style_name, "native_id": native_id, "text": paragraph.text,
+        }
+    return None
+
+
 def _extract_docx(path: Path) -> dict:
     from docx import Document
 
@@ -82,10 +120,24 @@ def _extract_docx(path: Path) -> dict:
             "header": [p.text for p in section.header.paragraphs if p.text.strip()],
             "footer": [p.text for p in section.footer.paragraphs if p.text.strip()],
         })
+    paragraphs, structure = [], []
+    for index, paragraph in enumerate(document.paragraphs):
+        if not paragraph.text.strip():
+            continue
+        native_id = f"word/document.xml/body/paragraph/{index}"
+        heading = _docx_native_heading(paragraph, native_id)
+        item = {
+            "index": index, "native_id": native_id,
+            "style": paragraph.style.name, "text": paragraph.text,
+        }
+        if heading is not None:
+            item["native_structure"] = heading
+            structure.append(heading)
+        paragraphs.append(item)
     return {
         "format": "docx",
-        "paragraphs": [{"index": i, "style": p.style.name, "text": p.text}
-                       for i, p in enumerate(document.paragraphs) if p.text.strip()],
+        "paragraphs": paragraphs,
+        "structure": structure,
         "tables": [[[[p.text for p in cell.paragraphs] for cell in row.cells]
                     for row in table.rows] for table in document.tables],
         "sections": sections,
@@ -197,6 +249,29 @@ def _office_visible_blocks(pdf_path: Path, page_no: int, scale: float) -> list[d
                                     round(float(block[2]) * scale, 2), round(float(block[3]) * scale, 2)],
                            "source": {"engine": "office_render_pdf_text", "path": f"page:{page_no + 1}"}})
         return result
+
+
+def _attach_docx_native_structure(native_blocks: list[dict], native: dict) -> list[dict]:
+    """仅在渲染文本与唯一 DOCX 标题段落完全同文时传递标题证据。"""
+    if native.get("format") != "docx":
+        return native_blocks
+    headings = {}
+    for item in native.get("structure", []) or []:
+        key = " ".join(str(item.get("text") or "").split()).casefold()
+        if key:
+            headings.setdefault(key, []).append(item)
+    for block in native_blocks:
+        key = " ".join(str(block.get("text") or "").split()).casefold()
+        candidates = headings.get(key, [])
+        if len(candidates) == 1:
+            block["native_structure"] = candidates[0]
+            block["native_structure_match"] = "unique_exact_text"
+        elif len(candidates) > 1:
+            block["native_structure_match"] = "ambiguous_exact_text"
+            block["native_structure_candidate_ids"] = [
+                item.get("native_id") for item in candidates
+            ]
+    return native_blocks
 
 
 def _render_office(source: Path, staging: Path, converter: str | None) -> Path:
@@ -359,8 +434,9 @@ def _prepare_leaf(source: str | Path, output: str | Path, *, dpi: int = 150,
                     )
                     scale = dpi / 72.0
                     for page in rendered:
-                        native_blocks = (_office_visible_blocks(pdf_for_pages, page["page_no"] - 1, scale)
-                                         if office_generated else [])
+                        native_blocks = (_attach_docx_native_structure(
+                            _office_visible_blocks(pdf_for_pages, page["page_no"] - 1, scale), native,
+                        ) if office_generated else [])
                         page_no = page["page_no"]
                         page_id = f"p{page_no:04d}"
                         relative_image = page["path"].relative_to(output).as_posix()

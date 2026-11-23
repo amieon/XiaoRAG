@@ -12,11 +12,12 @@ from .heading_classifier import (
     split_examples_by_document,
     train_transformer,
 )
+from .native_classifier import NativeHeadingClassifier
 from .reading_order import READING_ORDER_SOURCE, upstream_reading_order_metadata
 
 __all__ = [
     "BODY_LABEL", "HEADING_LABEL", "LABELS", "HeadingExample",
-    "TransformerHeadingClassifier", "format_model_input", "load_heading_examples",
+    "TransformerHeadingClassifier", "NativeHeadingClassifier", "format_model_input", "load_heading_examples",
     "split_examples_by_document", "train_transformer", "build_crop_context",
     "READING_ORDER_SOURCE", "upstream_reading_order_metadata",
 ]

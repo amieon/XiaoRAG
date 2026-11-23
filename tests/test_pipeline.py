@@ -156,6 +156,9 @@ class PipelineTests(unittest.TestCase):
             native_blocks=[{
                 "block_id": "native-1", "text": "原生文本",
                 "bbox": [1, 1, 54, 39],
+                "native_structure": {
+                    "source": "docx_style", "role": "heading", "heading_level": 2,
+                },
             }],
         )
         self.assertEqual(backend.text_calls, [])
@@ -164,6 +167,9 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result.page.blocks[0].confidence, 1.0)
         self.assertEqual(result.page.blocks[0].source.engine, "native_text")
         self.assertEqual(result.records[0]["engine"], "native_text")
+        self.assertEqual(
+            result.page.blocks[0].metadata["native_structures"][0]["heading_level"], 2,
+        )
 
     def test_pipeline_preserves_upstream_order_and_writes_crop_context(self):
         backend = FakeBackend([

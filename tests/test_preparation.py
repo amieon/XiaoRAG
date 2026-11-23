@@ -11,11 +11,48 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from doc_parser.preparation import _render_office, detect_format, prepare_document
+from doc_parser.preparation import (
+    _attach_docx_native_structure, _extract_docx,
+    _render_office, detect_format, prepare_document,
+)
 from doc_parser.routing import attach_native_text
 
 
 class PreparationTests(unittest.TestCase):
+    def test_docx_heading_styles_become_native_structure_evidence(self):
+        try:
+            from docx import Document
+        except ImportError:
+            self.skipTest("python-docx is unavailable")
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "heading.docx"
+            document = Document()
+            document.add_heading("第一章 总则", level=1)
+            document.add_paragraph("普通正文")
+            document.save(source)
+            native = _extract_docx(source)
+        self.assertEqual(len(native["structure"]), 1)
+        evidence = native["structure"][0]
+        self.assertEqual(evidence["heading_level"], 1)
+        self.assertIn(evidence["source"], {"docx_style", "docx_style_outline", "docx_outline"})
+        self.assertEqual(native["paragraphs"][0]["native_structure"], evidence)
+
+        blocks = [{"text": "第一章  总则"}, {"text": "普通正文"}]
+        _attach_docx_native_structure(blocks, native)
+        self.assertEqual(blocks[0]["native_structure"], evidence)
+        self.assertEqual(blocks[0]["native_structure_match"], "unique_exact_text")
+        self.assertNotIn("native_structure", blocks[1])
+
+    def test_ambiguous_docx_heading_text_is_not_arbitrarily_aligned(self):
+        evidence = {"source": "docx_style", "role": "heading", "native_id": "p1", "text": "总结"}
+        duplicate = {**evidence, "native_id": "p2"}
+        native = {"format": "docx", "structure": [evidence, duplicate]}
+        blocks = [{"text": "总结"}]
+        _attach_docx_native_structure(blocks, native)
+        self.assertNotIn("native_structure", blocks[0])
+        self.assertEqual(blocks[0]["native_structure_match"], "ambiguous_exact_text")
+        self.assertEqual(blocks[0]["native_structure_candidate_ids"], ["p1", "p2"])
+
     def test_pdf_creates_page_package_without_trusting_text_layer(self):
         try:
             import fitz

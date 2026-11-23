@@ -81,6 +81,8 @@ class OrchestrationTests(unittest.TestCase):
         (self.inputs / "nested" / "a.json").write_text('{"x": 1}', encoding="utf-8")
         self._image(self.inputs / "nested" / "page.png")
         (self.inputs / "unknown.bin").write_bytes(b"not-a-document")
+        (self.inputs / ".idea").mkdir()
+        (self.inputs / ".idea" / "workspace.xml").write_text("ignored", encoding="utf-8")
         output = self.inputs / "generated"
 
         manifest = run_folder(self.inputs, output, prepare_only=True)

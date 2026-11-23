@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import math
 from pathlib import Path
@@ -39,6 +39,7 @@ class HeadingExample:
     reading_order: int | None
     source_page_result: str
     label: str | None = None
+    native_structures: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -118,6 +119,11 @@ def load_heading_examples(
             route = route_by_region.get(int(order), {})
             metadata = block.get("metadata") or {}
             context = metadata.get("context") or route.get("context") or {}
+            native_structures = metadata.get("native_structures", metadata.get("native_structure", []))
+            if isinstance(native_structures, dict):
+                native_structures = [native_structures]
+            if not isinstance(native_structures, list):
+                native_structures = []
             block_id = str(block.get("block_id") or "")
             if not block_id:
                 raise ValueError(f"{path}: block without block_id")
@@ -139,6 +145,7 @@ def load_heading_examples(
                 reading_order=int(order) if order is not None else None,
                 source_page_result=str(path),
                 label=label,
+                native_structures=[item for item in native_structures if isinstance(item, dict)],
             ))
     missing = sorted(set(label_map) - used_labels)
     if missing:

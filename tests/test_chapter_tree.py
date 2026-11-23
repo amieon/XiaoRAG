@@ -20,6 +20,7 @@ from chapter_tree.heading_classifier import (
     split_examples_by_document,
     train_transformer,
 )
+from chapter_tree.native_classifier import NativeHeadingClassifier
 from chapter_tree.reading_order import upstream_reading_order_metadata
 
 
@@ -79,7 +80,12 @@ class ChapterTreeTests(unittest.TestCase):
                         {
                             "block_id": "doc_demo_p0001_b0000", "page_id": "doc_demo_p0001",
                             "text": "第一章", "reading_order": 0, "block_type": "paragraph",
-                            "metadata": {"raw_label": "text", "context": {"next": {"text": "正文"}}},
+                            "metadata": {
+                                "raw_label": "text", "context": {"next": {"text": "正文"}},
+                                "native_structures": [{
+                                    "source": "docx_style", "role": "heading", "heading_level": 1,
+                                }],
+                            },
                         },
                         {
                             "block_id": "doc_demo_p0001_b0001", "page_id": "doc_demo_p0001",
@@ -103,6 +109,7 @@ class ChapterTreeTests(unittest.TestCase):
             self.assertEqual([item.label for item in examples], ["heading", "body"])
             self.assertEqual({item.document_id for item in examples}, {"doc_demo"})
             self.assertEqual(examples[0].context["next"]["text"], "正文")
+            self.assertEqual(examples[0].native_structures[0]["heading_level"], 1)
 
     def test_split_is_deterministic_and_document_disjoint(self):
         examples = [
@@ -123,6 +130,23 @@ class ChapterTreeTests(unittest.TestCase):
             item.document_id for item in val_a
         ))
         self.assertEqual(len(val_a), 4)
+
+    def test_native_mode_trusts_docx_evidence_without_model_probabilities(self):
+        heading = example("doc_native", "body", "第一章")
+        heading.native_structures.append({
+            "source": "docx_style", "role": "heading", "heading_level": 1,
+            "native_id": "paragraph/0", "text": "第一章",
+        })
+        body = HeadingExample(**{
+            **example("doc_native", "body", "普通正文").__dict__,
+            "block_id": "doc_native_p0001_b0001",
+        })
+        predictions = NativeHeadingClassifier().predict([heading, body])
+        self.assertEqual([item["label"] for item in predictions], ["heading", "body"])
+        self.assertEqual(predictions[0]["heading_level"], 1)
+        self.assertEqual(predictions[0]["decision_source"], "docx_native_trust")
+        self.assertIsNone(predictions[0]["confidence"])
+        self.assertIsNone(predictions[0]["scores"])
 
     def test_metrics_and_training_guards_do_not_need_ml_dependencies(self):
         metrics = binary_metrics([0, 0, 1, 1], [0, 1, 1, 0])

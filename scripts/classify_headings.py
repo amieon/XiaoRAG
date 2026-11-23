@@ -1,6 +1,9 @@
-r"""用已微调模型预测 heading/body，不覆盖原始 page_result 或 DocumentIR。
+r"""预测 heading/body，不覆盖原始 page_result 或 DocumentIR。
 
-python scripts/classify_headings.py --input var/parsed --model var/heading-model-exp01 --output var/heading-predictions-exp01.jsonl
+原生模式（默认，无需训练）：
+python scripts/classify_headings.py --input var/parsed --mode native --output var/heading-native.jsonl
+模型模式：
+python scripts/classify_headings.py --input var/parsed --mode transformer --model var/heading-model-exp01 --output var/heading-model.jsonl
 """
 from __future__ import annotations
 
@@ -17,12 +20,14 @@ if str(SRC) not in sys.path:
 from chapter_tree.heading_classifier import (
     TransformerHeadingClassifier, load_heading_examples,
 )
+from chapter_tree.native_classifier import NativeHeadingClassifier
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Predict binary heading/body labels")
     parser.add_argument("--input", required=True, help="page_result.json or a directory containing them")
-    parser.add_argument("--model", required=True, help="Directory saved by train_heading_classifier.py")
+    parser.add_argument("--mode", choices=("native", "transformer"), default="native")
+    parser.add_argument("--model", help="Required in transformer mode; unused in native mode")
     parser.add_argument("--output", required=True, help="New prediction JSONL path")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--max-length", type=int)
@@ -33,16 +38,24 @@ def main() -> None:
     if output.exists():
         raise ValueError("Prediction output already exists; use a new file")
     examples = load_heading_examples(args.input)
-    classifier = TransformerHeadingClassifier(
-        args.model, device=args.device, max_length=args.max_length,
-    )
+    if args.mode == "native":
+        classifier = NativeHeadingClassifier()
+    else:
+        if not args.model:
+            raise ValueError("--model is required in transformer mode")
+        classifier = TransformerHeadingClassifier(
+            args.model, device=args.device, max_length=args.max_length,
+        )
     predictions = classifier.predict(examples, batch_size=args.batch_size)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("x", encoding="utf-8") as stream:
         for prediction in predictions:
             stream.write(json.dumps(prediction, ensure_ascii=False) + "\n")
     print(json.dumps({
-        "status": "success", "count": len(predictions), "output": str(output.resolve()),
+        "status": "success", "mode": args.mode, "count": len(predictions),
+        "heading_count": sum(item["label"] == "heading" for item in predictions),
+        "body_count": sum(item["label"] == "body" for item in predictions),
+        "output": str(output.resolve()),
     }, ensure_ascii=False, indent=2))
 
 

@@ -16,6 +16,7 @@ src/chapter_tree/
   reading_order.py        # 保留上游区域顺序并生成审计元数据，不做坐标重排
   context.py              # 构造前后 crop 原文窗口
   heading_classifier.py   # heading/body 数据链、Transformer 微调与推理
+  native_classifier.py    # 完全信任 DOCX 原生标题证据的无模型模式
 src/doc_parser/
   preparation.py          # 格式识别、原生抽取、Office/PDF/图片页包
   archive_security.py     # 压缩包安全边界、惰性 BFS 展开与来源链
@@ -86,7 +87,12 @@ models/PP-OCRv6_small_rec
 
 ## 标题／正文二分类
 
-`chapter_tree.heading_classifier` 使用预训练 Transformer 做 `heading/body` 二分类，不直接恢复标题层级。模型输入为“当前块＋前一块＋后一块”，当前块置首以避免被右侧截断。它必须加载微调后的模型目录；没有训练产物时会明确失败，不会用随机初始化分类头生成结果。
+标题／正文判定支持两种显式模式，不直接恢复完整章节树：
+
+- `native`（默认）：完全信任 DOCX 的显式 Heading／Title 样式和 OOXML 大纲级别，有原生标题证据则为 `heading`，否则为 `body`。不加载模型，`confidence/scores` 为 `null`，不伪造概率。
+- `transformer`：加载微调后的预训练 Transformer。模型输入为“当前块＋前一块＋后一块”，当前块置首以避免被右侧截断；没有训练产物时会明确失败，不会用随机初始化分类头生成结果。
+
+DOCX 预处理会把原生标题证据保存到 `native/objects.json` 的 `structure`，再与 LibreOffice 渲染后的原生文本块对齐。只有规范化全文相同且匹配唯一时才传递证据；重复标题文本会标记 `ambiguous_exact_text`，不会任选一个。该证据随后进入 crop 的 `metadata.native_structures`。因此 native 模式是“信任已明确对齐的原生结构”，不是根据短文本或字体猜标题；未对齐的块按正文处理。
 
 人工标签独立保存为 JSONL，每行一个块。`label` 可直接写 `heading/body`，也兼容 `section_heading/document_title/paragraph/text` 等等价名称：
 
@@ -103,10 +109,16 @@ models/PP-OCRv6_small_rec
 
 训练与验证按文档隔离；单文档数据会全部用于训练且没有验证集，不能据此报告泛化精度。训练环境需要 PyTorch、Transformers 和 safetensors，建议与 PaddleOCR 推理环境分开，按本机 CUDA 版本安装 PyTorch。`training_summary.json` 保存超参数、文档划分、类别权重及每轮标题类 F1／混淆矩阵。
 
-离线预测生成独立 JSONL，不覆盖 IR：
+离线预测生成独立 JSONL，不覆盖 IR。无需训练的原生模式：
 
 ```bat
-.venv\Scripts\python.exe scripts\classify_headings.py --input var\parsed --model var\heading-model-exp01 --output var\heading-predictions-exp01.jsonl
+.venv\Scripts\python.exe scripts\classify_headings.py --input var\parsed --mode native --output var\heading-native.jsonl
+```
+
+需要已微调模型的模式：
+
+```bat
+.venv\Scripts\python.exe scripts\classify_headings.py --input var\parsed --mode transformer --model var\heading-model-exp01 --output var\heading-predictions-exp01.jsonl
 ```
 
 上游 `raw_label` 可以辅助预标注，但若直接把它当全部真值，模型最多学习复现上游判断；要纠正标题误判，仍需人工复核和独立测试文档。
