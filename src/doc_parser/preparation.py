@@ -112,7 +112,10 @@ def _docx_native_heading(paragraph, native_id: str) -> dict | None:
 def _extract_docx(path: Path) -> dict:
     from docx import Document
 
+    from .docx_numbering import DocxNumbering
+
     document = Document(path)
+    numbering = DocxNumbering(document)
     sections = []
     for index, section in enumerate(document.sections):
         sections.append({
@@ -120,7 +123,7 @@ def _extract_docx(path: Path) -> dict:
             "header": [p.text for p in section.header.paragraphs if p.text.strip()],
             "footer": [p.text for p in section.footer.paragraphs if p.text.strip()],
         })
-    paragraphs, structure = [], []
+    paragraphs, structure, lists = [], [], []
     for index, paragraph in enumerate(document.paragraphs):
         if not paragraph.text.strip():
             continue
@@ -130,14 +133,19 @@ def _extract_docx(path: Path) -> dict:
             "index": index, "native_id": native_id,
             "style": paragraph.style.name, "text": paragraph.text,
         }
+        list_structure = numbering.list_structure(paragraph, native_id)
         if heading is not None:
             item["native_structure"] = heading
             structure.append(heading)
+        if list_structure is not None:
+            item["list_structure"] = list_structure
+            lists.append(list_structure)
         paragraphs.append(item)
     return {
         "format": "docx",
         "paragraphs": paragraphs,
         "structure": structure,
+        "lists": lists,
         "tables": [[[[p.text for p in cell.paragraphs] for cell in row.cells]
                     for row in table.rows] for table in document.tables],
         "sections": sections,
@@ -252,24 +260,47 @@ def _office_visible_blocks(pdf_path: Path, page_no: int, scale: float) -> list[d
 
 
 def _attach_docx_native_structure(native_blocks: list[dict], native: dict) -> list[dict]:
-    """仅在渲染文本与唯一 DOCX 标题段落完全同文时传递标题证据。"""
+    """唯一同文对齐标题和列表；自动编号允许去掉已解析的渲染前缀后匹配。"""
     if native.get("format") != "docx":
         return native_blocks
-    headings = {}
-    for item in native.get("structure", []) or []:
-        key = " ".join(str(item.get("text") or "").split()).casefold()
-        if key:
-            headings.setdefault(key, []).append(item)
+    candidates_by_text = {}
+    source_items = native.get("paragraphs")
+    if not isinstance(source_items, list):
+        # 兼容只保存 structure 清单的早期 native/objects.json。
+        source_items = [
+            {"native_structure": item, "text": item.get("text")}
+            for item in native.get("structure", []) or [] if isinstance(item, dict)
+        ]
+    for item in source_items:
+        if not isinstance(item, dict) or not (
+            isinstance(item.get("native_structure"), dict) or isinstance(item.get("list_structure"), dict)
+        ):
+            continue
+        text = " ".join(str(item.get("text") or "").split()).casefold()
+        if not text:
+            continue
+        keys = {text}
+        list_structure = item.get("list_structure") or {}
+        marker = list_structure.get("rendered_marker")
+        if isinstance(marker, str) and marker.strip():
+            keys.add(" ".join((marker.strip() + " " + text).split()).casefold())
+        for key in keys:
+            candidates_by_text.setdefault(key, []).append(item)
     for block in native_blocks:
         key = " ".join(str(block.get("text") or "").split()).casefold()
-        candidates = headings.get(key, [])
+        candidates = candidates_by_text.get(key, [])
         if len(candidates) == 1:
-            block["native_structure"] = candidates[0]
+            item = candidates[0]
+            if isinstance(item.get("native_structure"), dict):
+                block["native_structure"] = item["native_structure"]
+            if isinstance(item.get("list_structure"), dict):
+                block["list_structure"] = item["list_structure"]
             block["native_structure_match"] = "unique_exact_text"
         elif len(candidates) > 1:
             block["native_structure_match"] = "ambiguous_exact_text"
             block["native_structure_candidate_ids"] = [
-                item.get("native_id") for item in candidates
+                item.get("native_id") or (item.get("native_structure") or {}).get("native_id")
+                for item in candidates
             ]
     return native_blocks
 
