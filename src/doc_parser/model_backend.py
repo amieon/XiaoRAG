@@ -86,7 +86,7 @@ class PaddleModelBackend:
                 model_name=layout_model_name,
                 model_dir=str(layout_dir),
                 device=layout_device,
-                engine="paddle_dynamic",
+                engine=os.environ.get("PADDLEOCR_LAYOUT_ENGINE", "paddle_dynamic"),
                 batch_size=1,
             )
             self.vlm_model = paddlex.create_model(

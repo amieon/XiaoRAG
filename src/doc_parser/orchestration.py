@@ -255,7 +255,9 @@ def run_document(
                 "package": package_path.relative_to(output_root).as_posix(),
                 "image": image_ref,
                 "route_count": len(result.records),
-                "reading_order_status": result.page.metadata.get("reading_order", {}).get("status", "not_run"),
+                "reading_order_source": result.page.metadata.get("reading_order", {}).get(
+                    "source", "not_applicable",
+                ),
                 "prepared_only": prepare_only,
             })
     finally:

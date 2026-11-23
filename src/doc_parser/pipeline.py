@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from .document_ir import Block, DocumentIR, Page, SourceRef
-from .reading_order import ReadingOrderConfig, restore_page_reading_order
 from .routing import (
     GateConfig,
     VisualGate,
@@ -41,7 +40,7 @@ class ParserConfig:
     """可审计的识别、路由与并行配置。"""
 
     gate: GateConfig = field(default_factory=GateConfig)
-    reading_order: ReadingOrderConfig = field(default_factory=ReadingOrderConfig)
+    crop_context_chars: int = 300
     min_layout_box_side: float = 6.0
     native_min_coverage: float = 0.9
     max_new_tokens: int = 4096
@@ -67,6 +66,9 @@ class ParserConfig:
     gpu_worker_floor_mb: int = 2048
 
     def __post_init__(self) -> None:
+        if (not isinstance(self.crop_context_chars, int) or
+                isinstance(self.crop_context_chars, bool) or self.crop_context_chars < 1):
+            raise ValueError("crop_context_chars must be a positive integer")
         if not math.isfinite(self.min_layout_box_side) or self.min_layout_box_side < 1:
             raise ValueError("min_layout_box_side must be at least 1 pixel")
         if not 0 <= self.native_min_coverage <= 1:
@@ -99,8 +101,8 @@ class ParserConfig:
         data = dict(value)
         if "gate" in data:
             data["gate"] = GateConfig(**dict(data["gate"]))
-        if "reading_order" in data:
-            data["reading_order"] = ReadingOrderConfig.from_dict(dict(data["reading_order"]))
+        # 旧配置中的 reading_order 对应已删除的 XY-Cut，不再静默恢复坐标排序。
+        data.pop("reading_order", None)
         for key in (
             "drop_layout_labels", "figure_labels", "markdown_ignore_labels",
             "ocr_pixel_limits", "table_pixel_limits", "formula_pixel_limits",
@@ -366,6 +368,46 @@ def _layout_only_record(region: PageRegion, page_index: int) -> dict[str, Any]:
     }
 
 
+def _crop_context(
+    regions: list[PageRegion],
+    texts: list[str],
+    position: int,
+    *,
+    page_id: str,
+    max_chars: int,
+) -> dict[str, Any]:
+    """保存相邻 crop 的识别原文窗口；前文取后缀，后文取前缀。"""
+    def neighbor(neighbor_position: int, side: str) -> dict[str, Any] | None:
+        if not 0 <= neighbor_position < len(regions):
+            return None
+        region = regions[neighbor_position]
+        text = texts[neighbor_position]
+        full_length = len(text)
+        if side == "previous":
+            start, end = max(0, full_length - max_chars), full_length
+        else:
+            start, end = 0, min(full_length, max_chars)
+        return {
+            "block_id": f"{page_id}_b{region.index:04d}",
+            "region_index": region.index,
+            "raw_label": region.label,
+            "text": text[start:end],
+            "char_start": start,
+            "char_end": end,
+            "full_length": full_length,
+            "truncated": end - start < full_length,
+        }
+
+    return {
+        "schema_version": "crop-context.v1",
+        "scope": "page",
+        "order_source": "layout_region_order",
+        "max_chars_per_side": max_chars,
+        "previous": neighbor(position - 1, "previous"),
+        "next": neighbor(position + 1, "next"),
+    }
+
+
 def render_markdown(page: Page, config: ParserConfig) -> str:
     """Deterministic human-facing export; DocumentIR remains the primary output."""
     chunks: list[str] = []
@@ -452,14 +494,23 @@ class RegionPipeline:
         if output is not None:
             output.mkdir(parents=True, exist_ok=True)
         page_id = f"{document_id}_p{page_no:04d}"
+        region_texts = [
+            str(outputs.get((page_index, region.index), {}).get("result") or "").strip()
+            for region in regions
+        ]
         blocks: list[Block] = []
-        for region in regions:
+        for position, region in enumerate(regions):
             key = (page_index, region.index)
             route = route_by_id.get(key)
             if route is None:
                 route = _layout_only_record(region, page_index)
                 records.append(route)
             result = outputs.get(key, {})
+            context = _crop_context(
+                regions, region_texts, position,
+                page_id=page_id, max_chars=self.config.crop_context_chars,
+            )
+            route["context"] = context
             asset_path = None
             if output is not None and self.config.save_region_images:
                 asset_name = f"{page_id}_b{region.index:04d}.png"
@@ -479,6 +530,7 @@ class RegionPipeline:
                 "native_block_ids": region.metadata.get("native_block_ids", []),
                 "layout": _plain(region.metadata),
                 "asset_path": asset_path,
+                "context": context,
             }
             blocks.append(Block(
                 block_id=f"{page_id}_b{region.index:04d}",
@@ -514,12 +566,19 @@ class RegionPipeline:
             metadata={
                 "pipeline": PIPELINE_VERSION,
                 "layout_region_count": len(regions),
+                "reading_order": {
+                    "status": "model_provided",
+                    "source": "layout_region_order",
+                    "ordered_block_ids": [
+                        f"{page_id}_b{region.index:04d}" for region in regions
+                    ],
+                },
                 "recognized_region_count": len(groups) and sum(
                     len(group["images"]) for group in groups.values()
                 ),
             },
         )
-        restore_page_reading_order(page, self.config.reading_order)
+        # 区域序号就是上游模型顺序；不再按 bbox 做 XY-Cut 二次排序。
         page.validate()
         records.sort(key=lambda item: (item.get("page_id", 0), item.get("block_id", [0, 0])[1]))
         result = PageParseResult(

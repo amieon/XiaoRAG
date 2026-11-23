@@ -14,7 +14,8 @@ DocumentIR → 知识单元构建（语义树、知识单元、证据定位） �
 ```text
 src/doc_parser/
   preparation.py          # 格式识别、原生抽取、Office/PDF/图片页包
-  pipeline.py             # 区域对象、识别编排、DocumentIR 与 Markdown 导出
+  archive_security.py     # 压缩包安全边界、惰性 BFS 展开与来源链
+  pipeline.py             # 区域对象、识别编排、crop 上下文、DocumentIR 与 Markdown 导出
   routing.py              # native/light/VLM 分流与审计记录
   visual_gate.py          # 可解释的图像和版面风险特征
   model_backend.py        # 公开 PaddleOCR/PaddleX 模型接口与单页运行时
@@ -47,12 +48,16 @@ py -m venv .venv
 
 ## 完整识别并生成知识单元
 
-先安装与本机 CUDA 匹配的 PaddlePaddle，再安装固定版本适配器依赖：
+先安装与本机 CUDA 匹配的 PaddlePaddle，再安装固定版本适配器依赖。Windows/CUDA 12.9 的已验证示例为：
 
 ```bat
+.venv\Scripts\python.exe -m pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
+.venv\Scripts\python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 .venv\Scripts\python.exe -m pip install -r requirements-paddleocr.txt
 .venv\Scripts\python.exe scripts\run_parser.py --input "待处理目录" --output "var\parsed" --config config\parser.json --build-knowledge-units --knowledge-unit-config config\knowledge_units.json
 ```
+
+布局模型与 VLM 默认使用 `paddle_dynamic`，轻量 OCR 使用 `paddle_static`。Torch 仅供图像预处理，不要为了 Transformers 推理改装 CUDA 版 Torch；混合加载 Paddle 与 CUDA Torch 曾在 Windows 上引发 cuDNN DLL 冲突。原生 Paddle/SentencePiece 加载器对中文绝对路径存在兼容性问题，默认模型路径使用项目根目录下的 ASCII 相对路径，因此完整识别命令应从项目根目录执行。
 
 默认模型目录：
 
@@ -64,6 +69,14 @@ models/PP-OCRv6_small_rec
 ```
 
 设备与模型名通过 `.env.example` 中列出的环境变量配置。密钥和凭证不得放进配置或 Git。
+
+## 上游阅读顺序与 crop 上下文
+
+视觉页直接使用上游版面模型返回的区域顺序：`region.index` 同时成为 `Block.reading_order`，不再运行 XY-Cut，也不根据 bbox 二次排序。页级 `metadata.reading_order` 记录 `model_provided / layout_region_order` 和有序块 ID，便于审计。
+
+全部 crop 识别完成后，每个 `routes.jsonl` 记录及对应 IR 块的 `metadata.context` 都会保存同页的 `previous`、`next` 上下文。每项包含邻块 `block_id`、区域序号、原始布局标签、识别原文、字符区间、完整长度和截断标志；页首的前文、页尾的后文为 `null`，不跨页拼接。当前块文本仍使用原有 `result/text`，不在上下文里重复保存。
+
+默认每侧最多保留 300 个 Unicode 字符，前一块取末尾、后一块取开头，可通过 `config/parser.json` 的 `crop_context_chars` 调整。截断只影响内嵌上下文窗口，不修改 IR 正文；下游可凭 `block_id` 回查完整邻块。
 
 ## 从已有 DocumentIR 离线生成知识单元
 
@@ -139,6 +152,19 @@ knowledge-units/
 
 每个文件使用独立输出目录；不支持的格式记为 `unsupported`，坏文件记为 `failed`，其余文件继续处理。纯文本和纯原生文档不会触发模型加载。
 
+### 压缩包展开与安全
+
+ZIP/TAR 使用 `archive_security.py` 中的单一公开入口 `iter_archive_documents_safely()`。它按 BFS 惰性产出普通文件：发现文档后立即交给预处理，发现子压缩包则入队，不递归调用文档处理，也不等待整棵压缩树全部解压。DOCX/PPTX/XLSX 会先被识别为 Office 文档，不会误当普通 ZIP 展开。
+
+压缩包根 `manifest.json` 使用扁平 `documents` 清单，不再嵌套 `children`。每个成员保留：
+
+- `source_path`：从外层压缩包到当前文件的完整来源链；
+- `archive_path`：包含当前文件的压缩包链；
+- `relative_path`：当前文件在最内层压缩包中的相对路径；
+- `path`：本成员的独立预处理产物目录。
+
+安全边界拒绝绝对路径、`..` 路径穿越、软链接/硬链接、非普通文件、加密 ZIP 成员、重名成员和异常压缩比，并核对声明大小与实际写出字节。整次 BFS 共享文件数量、解压总字节和嵌套深度预算；默认上限分别为 10000 个成员、2 GiB、4 层。安全拒绝会使当前压缩包任务失败，不会把攻击样本静默记为普通不支持文档。加密 ZIP 明确报出 `Encrypted archive member is unsupported`，不提供密码遍历，也不在配置、日志或清单中保存密码。
+
 ## 基准实验
 
 ```bat
@@ -149,9 +175,9 @@ knowledge-units/
 
 ## 验证状态与当前边界
 
-- 35 项无模型测试覆盖知识单元核心规则、坏引用、字节级确定性、独立与批量 CLI、主链接入、核心管线、原生绕过、CPU 真并行、页级并发、显存准入和顺序回收。
+- 53 项无模型测试覆盖知识单元核心规则、坏引用、字节级确定性、独立与批量 CLI、主链接入、压缩包 BFS 与攻击拦截、核心管线、单栏/多栏/跨栏/单图环绕阅读顺序、顺序异常回退、原生绕过、CPU 真并行、页级并发、显存准入和顺序回收。
 - 已用真实 TXT 输入完成 `run_parser.py --build-knowledge-units` 端到端样例，并完成 1 轮预热、2 轮正式计时的基准冒烟验证。
-- 当前环境没有模型权重，尚未执行真实 PP-DocLayoutV3/PaddleOCR-VL 推理；不能把单元测试当作精度、速度或显存验收。
+- 已在 Windows、RTX 4070 Laptop 8GB 上完成单页真实模型冒烟：布局模型、VLM 和轻量 OCR 均成功加载，一页产生 8 条区域路由且全部由轻量 OCR 识别，阅读顺序状态为 `confirmed`。该次 VLM 只加载未参与识别；单页成功不等于多栏精度、整本速度或显存峰值已经验收。
 - 表格若返回未转换的 OTSL，会原样保存在 IR，并在 Markdown 的 `<pre>` 中展示，不伪装成 HTML 表格。
 - 知识单元首版不做跨页续段猜测、LLM 改写、向量化或数据库写入；切分默认值仍需通过质量评测中的检索对照实验调整。
 - 当前交付是 CLI 与 Python 库入口，不包含线上 FastAPI 服务。

@@ -8,6 +8,7 @@
     "orientation_angle_threshold": 15.0,
     "math_score_threshold": 0.45
   },
+  "crop_context_chars": 300,
   "min_layout_box_side": 6.0,
   "native_min_coverage": 0.9,
   "max_new_tokens": 4096,

@@ -118,6 +118,10 @@ class PipelineTests(unittest.TestCase):
         payload = json.loads((output / "page_result.json").read_text(encoding="utf-8"))
         self.assertEqual(payload["schema_version"], "page-result.v2")
         self.assertEqual(len(payload["page"]["blocks"]), 3)
+        self.assertEqual(
+            payload["routes"][0]["context"],
+            payload["page"]["blocks"][0]["metadata"]["context"],
+        )
 
     def test_public_vlm_adapter_passes_items_and_generation_limits(self):
         backend = PaddleModelBackend.__new__(PaddleModelBackend)
@@ -161,25 +165,38 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result.page.blocks[0].source.engine, "native_text")
         self.assertEqual(result.records[0]["engine"], "native_text")
 
-    def test_pipeline_recovers_two_column_order_instead_of_using_detector_order(self):
+    def test_pipeline_preserves_upstream_order_and_writes_crop_context(self):
         backend = FakeBackend([
             {"label": "text", "coordinate": [90, 10, 150, 25]},
             {"label": "text", "coordinate": [10, 10, 70, 25]},
             {"label": "text", "coordinate": [10, 35, 70, 50]},
             {"label": "text", "coordinate": [90, 35, 150, 50]},
         ])
-        result = RegionPipeline(backend).parse_image(
+        result = RegionPipeline(
+            backend, ParserConfig(crop_context_chars=3),
+        ).parse_image(
             self.image_path, document_id="doc_columns", page_no=1,
         )
         ordered = sorted(result.page.blocks, key=lambda block: block.reading_order)
         self.assertEqual(
             [block.source.extra["region_index"] for block in ordered],
-            [1, 2, 0, 3],
-        )
-        self.assertEqual(result.page.metadata["reading_order"]["status"], "confirmed")
-        self.assertEqual(
-            [block.metadata["layout_reading_order"] for block in result.page.blocks],
             [0, 1, 2, 3],
+        )
+        self.assertEqual(result.page.metadata["reading_order"]["status"], "model_provided")
+        self.assertEqual(result.page.metadata["reading_order"]["source"], "layout_region_order")
+
+        contexts = [block.metadata["context"] for block in ordered]
+        previous_text, next_text = ordered[0].text, ordered[1].text
+        self.assertIsNone(contexts[0]["previous"])
+        self.assertEqual(contexts[0]["next"]["text"], next_text[:3])
+        self.assertEqual(contexts[0]["next"]["block_id"], "doc_columns_p0001_b0001")
+        self.assertEqual(contexts[1]["previous"]["text"], previous_text[-3:])
+        self.assertEqual(contexts[1]["previous"]["char_start"], len(previous_text) - 3)
+        self.assertEqual(contexts[1]["previous"]["char_end"], len(previous_text))
+        self.assertTrue(contexts[1]["previous"]["truncated"])
+        self.assertIsNone(contexts[-1]["next"])
+        self.assertEqual(
+            [record["context"] for record in result.records], contexts,
         )
 
     def test_config_round_trip_and_threshold_override(self):
