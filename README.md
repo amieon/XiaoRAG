@@ -28,6 +28,7 @@ src/hybrid_retrieval/
   bm25.py                 # 可序列化的纯 Python Okapi BM25 索引与查询
   embedding.py            # sentence-transformers 编码与精确稠密 Top-K
   index.py                # 两路索引建库、清单校验与命中字段装配
+  pgvector_store.py       # 可选 pgvector dense 导入与精确余弦 Top-K
 src/doc_parser/
   preparation.py          # 格式识别、原生抽取、Office/PDF/图片页包
   docx_numbering.py       # OOXML 自动编号列表、层级与序号提取
@@ -52,6 +53,8 @@ scripts/
   export_retrieval_units.py    # 统一双方切块输出，导出 M2 检索单元
   build_retrieval_index.py     # 同时构建稠密向量与 BM25 本地索引
   query_retrieval_index.py     # 独立执行 dense 或 BM25 Top-K 查询
+  store_dense_pgvector.py      # 复用 embeddings.npy 导入 pgvector，不重新编码
+  query_dense_pgvector.py      # 独立查询 pgvector dense Top-K
 config/
   parser.json             # 路由、识别和并行参数
   knowledge_units.json    # 知识单元切分与复核参数
@@ -218,6 +221,32 @@ manifest.json             # 模型 ID、维度、分词器、数量和完成标�
 
 dense 查询从建库清单读取同一个嵌入模型；BM25 查询不加载嵌入模型。返回命中包含 `unit_id/score/rank`、child 文本、`parent_id`、标题路径、来源和权限字段，parent 正文不自动拼入结果。算法测试使用小型显式假向量验证矩阵、排序和数据流，不代表真实模型效果；真实模型的加载、精度和批量性能仍需使用实际模型与文档另行验证。
 
+### 可选：只把 dense 存入 pgvector
+
+方案中的 pgvector／Milvus 是向量层的备选实现，不要求把所有 JSON 搬进向量库。这里选择 pgvector：DocumentIR、chunks、parent、原始页图和 BM25 索引继续留在文件系统；PostgreSQL schema 只复制 dense 向量及命中返回所需的 ID、正文、来源和权限元数据。JSONL 仍是可重建的权威交换产物，数据库是派生索引。
+
+先在 PostgreSQL 中安装并启用 pgvector：
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+再安装 Python 驱动，在当前终端设置 DSN。不要把真实 DSN 写进脚本、README、清单或 Git；如果使用本地 `.env`，权限必须为仅当前用户可读写（Linux 为 600），且脚本不会自动加载该文件：
+
+```bat
+.venv\Scripts\python.exe -m pip install -r requirements-pgvector.txt
+set PGVECTOR_DSN=postgresql://用户名:密码@主机:5432/数据库名
+.venv\Scripts\python.exe scripts\store_dense_pgvector.py --index "var\retrieval-index-exp01" --schema retrieval_exp01
+```
+
+导入直接读取已有 `embeddings.npy` 和 `units.jsonl`，不会重新运行嵌入模型。每个实验使用一个新的 schema，已存在则失败，不覆盖旧索引；建 schema、建表和批量写入在同一事务中完成。当前表保存 `unit_id/document_id/parent_id`、向量、child 正文、标题路径、来源、页码和权限字段，不保存 parent 全文或 BM25 postings。
+
+```bat
+.venv\Scripts\python.exe scripts\query_dense_pgvector.py --schema retrieval_exp01 --query "增量更新如何生效" --top-k 5 --device cpu
+```
+
+查询使用 pgvector 的 `<=>` 余弦距离排序，返回 `score=1-distance`，当前为精确扫描，没有创建 HNSW／IVFFlat 近似索引。数据库测试使用伪连接验证 SQL 数据流、字段恢复、模型一致性和 DSN 不泄漏；真实 PostgreSQL 服务、扩展安装和端到端性能尚需在本机联调。
+
 ## 从已有 DocumentIR 离线生成知识单元
 
 单份 `document.json`、单文档 `results/` 目录均可：
@@ -315,12 +344,12 @@ ZIP/TAR 使用 `archive_security.py` 中的单一公开入口 `iter_archive_docu
 
 ## 验证状态与当前边界
 
-- 当前全量回归为 109 项测试及 12 个子测试通过，覆盖知识单元、章节树、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序和两路索引查询。
+- 当前全量回归为 112 项测试及 12 个子测试通过，覆盖知识单元、章节树、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序和两路索引查询。
 - 已用显式小型向量完成索引构建与 BM25 独立查询 CLI 冒烟；该结果只验证算法和数据流。真实 `sentence-transformers` 模型尚未在本次环境中完成加载、检索精度或批量性能验证。
 - 已用真实 TXT 输入完成 `run_parser.py --build-knowledge-units` 端到端样例，并完成 1 轮预热、2 轮正式计时的基准冒烟验证。
 - 已在 Windows、RTX 4070 Laptop 8GB 上完成单页真实模型冒烟：布局模型、VLM 和轻量 OCR 均成功加载，一页产生 8 条区域路由且全部由轻量 OCR 识别，阅读顺序状态为 `confirmed`。该次 VLM 只加载未参与识别；单页成功不等于多栏精度、整本速度或显存峰值已经验收。
 - 表格若返回未转换的 OTSL，会原样保存在 IR，并在 Markdown 的 `<pre>` 中展示，不伪装成 HTML 表格。
-- 知识单元首版不做跨页续段猜测、LLM 改写、向量化或数据库写入；切分默认值仍需通过质量评测中的检索对照实验调整。
+- 知识单元构建本身不做跨页续段猜测、LLM 改写或数据库写入；向量化与 pgvector 入库是后续独立步骤。切分默认值仍需通过质量评测中的检索对照实验调整。
 - 当前交付是 CLI 与 Python 库入口，不包含线上 FastAPI 服务。
 
 运行全部测试：

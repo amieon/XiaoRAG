@@ -1,0 +1,2 @@
+# 可选 PostgreSQL/pgvector dense 存储驱动；不包含数据库服务器。
+psycopg[binary]>=3.1,<4
