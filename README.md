@@ -28,6 +28,7 @@ src/hybrid_retrieval/
   bm25.py                 # 可序列化的纯 Python Okapi BM25 索引与查询
   embedding.py            # sentence-transformers 编码与精确稠密 Top-K
   index.py                # 两路索引建库、清单校验与命中字段装配
+  merge.py                # 多文档／双 producer 导出合并与全局父子关系校验
   pgvector_store.py       # 可选 pgvector dense 导入与精确余弦 Top-K
   milvus_store.py         # 可选 Milvus FLAT+COSINE collection 与 dense 查询
 src/doc_parser/
@@ -52,6 +53,7 @@ scripts/
   build_chapter_tree.py        # DocumentIR 独立构建章节树和结构 groups
   build_chunks.py              # 生成 structural-chunk.v1 两层父子块并硬校验
   export_retrieval_units.py    # 统一双方切块输出，导出 M2 检索单元
+  merge_retrieval_units.py     # 多文档 units/parents 合并为一份建库语料
   build_retrieval_index.py     # 同时构建稠密向量与 BM25 本地索引
   query_retrieval_index.py     # 独立执行 dense 或 BM25 Top-K 查询
   store_dense_pgvector.py      # 复用 embeddings.npy 导入 pgvector，不重新编码
@@ -194,6 +196,22 @@ DOCX 自动编号列表另从 OOXML `numPr/numbering.xml` 提取，保存到 `li
 ```
 
 学长输出使用同一命令，仅把 `--producer` 改为 `senior_strategy`。输出 `retrieval-units.jsonl`、`retrieval-parents.jsonl` 和 `manifest.json`。M2 只对前者的 `embedding_text` 向量化，命中后按命名空间内的 `parent_id` 取父块。适配器校验父子成员、重复 ID、空文本和来源定位；权限／密级缺失时失败关闭，不默认公开。
+
+### 合并多文档建库语料
+
+每份文档分别导出后，用合并器生成一份多文档语料，不需要手工拼接 JSONL：
+
+```bat
+.venv\Scripts\python.exe scripts\merge_retrieval_units.py --inputs "var\retrieval-units-docA" "var\retrieval-units-docB" "var\retrieval-units-docA-senior" --output "var\retrieval-merged-exp01"
+```
+
+输入顺序就是合并后的记录顺序，所有记录原样保留。同一文档可以同时包含 `chapter_tree` 和 `senior_strategy` 两套结果；同一 `producer+document_id` 重复输入会被拒绝，避免误把两个版本混入同一索引。合并器还检查输入清单与数量、记录 schema、document/producer 一致性、unit／parent 全局 ID 冲突、悬空 parent、跨文档错误父子引用和无 child 的 parent。全部校验通过后才开始写出，输出目录必须为空。
+
+输出仍是 `retrieval-units.jsonl`、`retrieval-parents.jsonl` 和 `manifest.json`。清单记录每个输入的文档、producer、源 chunks 哈希和数量，以及总文档数、producer 分布和 `merge_complete=True`，可以直接作为下一步建库输入：
+
+```bat
+.venv\Scripts\python.exe scripts\build_retrieval_index.py --units "var\retrieval-merged-exp01\retrieval-units.jsonl" --parents "var\retrieval-merged-exp01\retrieval-parents.jsonl" --model "本地嵌入模型路径或模型ID" --device cpu --batch-size 16 --output "var\retrieval-index-exp01"
+```
 
 ## 稠密向量与 BM25 建库查询
 
@@ -379,7 +397,7 @@ ZIP/TAR 使用 `archive_security.py` 中的单一公开入口 `iter_archive_docu
 
 ## 验证状态与当前边界
 
-- 当前全量回归为 115 项测试及 12 个子测试通过，覆盖知识单元、章节树、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序和两路索引查询。
+- 当前全量回归为 119 项测试及 12 个子测试通过，覆盖知识单元、章节树、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序和两路索引查询。
 - 已用显式小型向量完成索引构建与 BM25 独立查询 CLI 冒烟，并用真实 Milvus Lite 文件库完成 FLAT+COSINE 建库、加载和 Top-K 查询；这些结果只验证算法和存储数据流。真实 `sentence-transformers` 模型尚未在本次环境中完成加载、检索精度或批量性能验证。
 - 已用真实 TXT 输入完成 `run_parser.py --build-knowledge-units` 端到端样例，并完成 1 轮预热、2 轮正式计时的基准冒烟验证。
 - 已在 Windows、RTX 4070 Laptop 8GB 上完成单页真实模型冒烟：布局模型、VLM 和轻量 OCR 均成功加载，一页产生 8 条区域路由且全部由轻量 OCR 识别，阅读顺序状态为 `confirmed`。该次 VLM 只加载未参与识别；单页成功不等于多栏精度、整本速度或显存峰值已经验收。
