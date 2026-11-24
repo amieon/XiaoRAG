@@ -1,0 +1,2 @@
+# 可选 Milvus/Milvus Lite 客户端；服务端部署与客户端依赖分开管理。
+pymilvus>=2.4,<4

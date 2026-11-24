@@ -29,6 +29,7 @@ src/hybrid_retrieval/
   embedding.py            # sentence-transformers 编码与精确稠密 Top-K
   index.py                # 两路索引建库、清单校验与命中字段装配
   pgvector_store.py       # 可选 pgvector dense 导入与精确余弦 Top-K
+  milvus_store.py         # 可选 Milvus FLAT+COSINE collection 与 dense 查询
 src/doc_parser/
   preparation.py          # 格式识别、原生抽取、Office/PDF/图片页包
   docx_numbering.py       # OOXML 自动编号列表、层级与序号提取
@@ -55,6 +56,8 @@ scripts/
   query_retrieval_index.py     # 独立执行 dense 或 BM25 Top-K 查询
   store_dense_pgvector.py      # 复用 embeddings.npy 导入 pgvector，不重新编码
   query_dense_pgvector.py      # 独立查询 pgvector dense Top-K
+  store_dense_vector.py        # --backend pgvector|milvus 统一向量入库
+  query_dense_vector.py        # --backend pgvector|milvus 统一 dense 查询
 config/
   parser.json             # 路由、识别和并行参数
   knowledge_units.json    # 知识单元切分与复核参数
@@ -247,6 +250,38 @@ set PGVECTOR_DSN=postgresql://用户名:密码@主机:5432/数据库名
 
 查询使用 pgvector 的 `<=>` 余弦距离排序，返回 `score=1-distance`，当前为精确扫描，没有创建 HNSW／IVFFlat 近似索引。数据库测试使用伪连接验证 SQL 数据流、字段恢复、模型一致性和 DSN 不泄漏；真实 PostgreSQL 服务、扩展安装和端到端性能尚需在本机联调。
 
+### 可选：Milvus 后端与统一参数
+
+pgvector 和 Milvus 可以共存，通过统一的 `--backend` 选择；两者都只是 dense 派生存储，不改变 JSONL、BM25 或 parent 库：
+
+```bat
+.venv\Scripts\python.exe -m pip install -r requirements-milvus.txt
+set MILVUS_URI=http://localhost:19530
+set MILVUS_TOKEN=你的token
+.venv\Scripts\python.exe scripts\store_dense_vector.py --index "var\retrieval-index-exp01" --backend milvus --name retrieval_exp01
+.venv\Scripts\python.exe scripts\query_dense_vector.py --backend milvus --name retrieval_exp01 --query "增量更新如何生效" --top-k 5
+```
+
+无认证的本地开发服务可不设置 `MILVUS_TOKEN`。token 只从环境变量读取，URI、token 不写入返回清单。每个实验使用新 collection，已存在则失败；如果本次创建后写入失败，只清理本次新建的半成品 collection，不删除旧数据。
+
+Milvus collection 使用显式 schema：`unit_id` 是主键，`embedding` 是固定维度向量，`embedding_model` 用于查询模型一致性检查，其余字段只包括 child 正文、parent ID、标题路径、来源、页码和权限元数据。向量索引为 `FLAT+COSINE`，因此当前是精确检索，不是 HNSW 近似召回；`score` 直接是 Milvus 返回的 COSINE 相似度，越大越相似。
+
+Linux／macOS 也可安装本地文件库组件，Windows 原生不支持时应使用上面的服务端 URI：
+
+```bat
+.venv\Scripts\python.exe -m pip install -r requirements-milvus-lite.txt
+set MILVUS_URI=var\milvus\retrieval.db
+```
+
+随后使用相同的 `store_dense_vector.py --backend milvus` 和 `query_dense_vector.py --backend milvus`。本地 `.db` 属于模型／实验产物，应放在 `var/` 等被 Git 忽略的目录。已用真实 Milvus Lite 文件库完成两条显式向量的建库、模型元数据读取和 Top-K 查询冒烟；这只验证数据库数据流，不代表真实嵌入模型效果，也不代表 Milvus 服务端部署与大规模性能已验收。
+
+统一参数也适用于 pgvector：
+
+```bat
+.venv\Scripts\python.exe scripts\store_dense_vector.py --index "var\retrieval-index-exp01" --backend pgvector --name retrieval_exp01
+.venv\Scripts\python.exe scripts\query_dense_vector.py --backend pgvector --name retrieval_exp01 --query "增量更新如何生效" --top-k 5
+```
+
 ## 从已有 DocumentIR 离线生成知识单元
 
 单份 `document.json`、单文档 `results/` 目录均可：
@@ -344,8 +379,8 @@ ZIP/TAR 使用 `archive_security.py` 中的单一公开入口 `iter_archive_docu
 
 ## 验证状态与当前边界
 
-- 当前全量回归为 112 项测试及 12 个子测试通过，覆盖知识单元、章节树、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序和两路索引查询。
-- 已用显式小型向量完成索引构建与 BM25 独立查询 CLI 冒烟；该结果只验证算法和数据流。真实 `sentence-transformers` 模型尚未在本次环境中完成加载、检索精度或批量性能验证。
+- 当前全量回归为 115 项测试及 12 个子测试通过，覆盖知识单元、章节树、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序和两路索引查询。
+- 已用显式小型向量完成索引构建与 BM25 独立查询 CLI 冒烟，并用真实 Milvus Lite 文件库完成 FLAT+COSINE 建库、加载和 Top-K 查询；这些结果只验证算法和存储数据流。真实 `sentence-transformers` 模型尚未在本次环境中完成加载、检索精度或批量性能验证。
 - 已用真实 TXT 输入完成 `run_parser.py --build-knowledge-units` 端到端样例，并完成 1 轮预热、2 轮正式计时的基准冒烟验证。
 - 已在 Windows、RTX 4070 Laptop 8GB 上完成单页真实模型冒烟：布局模型、VLM 和轻量 OCR 均成功加载，一页产生 8 条区域路由且全部由轻量 OCR 识别，阅读顺序状态为 `confirmed`。该次 VLM 只加载未参与识别；单页成功不等于多栏精度、整本速度或显存峰值已经验收。
 - 表格若返回未转换的 OTSL，会原样保存在 IR，并在 Markdown 的 `<pre>` 中展示，不伪装成 HTML 表格。

@@ -1,0 +1,3 @@
+# 可选本地文件库模式；Windows 原生不可用时请改用 Milvus 服务端 URI。
+-r requirements-milvus.txt
+pymilvus[milvus_lite]>=2.4,<4
