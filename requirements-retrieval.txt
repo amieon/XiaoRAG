@@ -1,0 +1,3 @@
+# 独立检索依赖；不扰动 OCR/Paddle 运行环境。
+numpy>=1.26
+sentence-transformers>=3.0,<6

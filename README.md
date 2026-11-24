@@ -22,6 +22,12 @@ src/chapter_tree/
 src/doc_chunking/
   engine.py               # 章节树 groups → parent/child，列表与条款约束子块
   validation.py           # 父子关系、正文切片、来源与字符区间硬校验
+src/hybrid_retrieval/
+  adapter.py              # 混合检索输入：structural-chunk.v1 → 统一检索单元与 parent 库
+  tokenizer.py            # 中文单字＋相邻二元词，英文／数字／版本号完整保留
+  bm25.py                 # 可序列化的纯 Python Okapi BM25 索引与查询
+  embedding.py            # sentence-transformers 编码与精确稠密 Top-K
+  index.py                # 两路索引建库、清单校验与命中字段装配
 src/doc_parser/
   preparation.py          # 格式识别、原生抽取、Office/PDF/图片页包
   docx_numbering.py       # OOXML 自动编号列表、层级与序号提取
@@ -43,6 +49,9 @@ scripts/
   classify_headings.py         # 离线预测 heading/body，不改写原始 IR
   build_chapter_tree.py        # DocumentIR 独立构建章节树和结构 groups
   build_chunks.py              # 生成 structural-chunk.v1 两层父子块并硬校验
+  export_retrieval_units.py    # 统一双方切块输出，导出 M2 检索单元
+  build_retrieval_index.py     # 同时构建稠密向量与 BM25 本地索引
+  query_retrieval_index.py     # 独立执行 dense 或 BM25 Top-K 查询
 config/
   parser.json             # 路由、识别和并行参数
   knowledge_units.json    # 知识单元切分与复核参数
@@ -157,6 +166,56 @@ DOCX 自动编号列表另从 OOXML `numPr/numbering.xml` 提取，保存到 `li
 
 输出 `chunks.jsonl`（全部 parent 在前、child 在后）、`chapter-tree.json`、`preprocessing.json`、`decision.json` 和 `self_check.json`。每个 group 必定有一个 parent 和至少一个 child；短组父子正文相同是正常行为。校验器会检查正文切片无缝无重叠、父子成员、来源定位、字符区间和 JSON Pointer。PPT／Excel 继续走显式格式通道，不套章节树。
 
+## M2 统一知识单元导出
+
+学长策略和章节树共用同一个适配器，不让向量化、版本管理或结构化压缩分别理解两套字段。适配器只消费单文档 `chunks.jsonl`，child 导出为 `retrieval-unit.v1`，parent 导出为独立的 `retrieval-parent.v1`；`embedding_text` 原等于 child 的 `text`，不去标题、不去重、不改写。`producer` 只作溯源，`content_hash` 供版本与增量管理使用，顺序 chunk ID 不作为跨版本稳定身份。
+
+权限策略必须显式提供，例如 `security.json`：
+
+```json
+{
+  "classification": "internal",
+  "allowed_principals": ["group:engineering"]
+}
+```
+
+执行导出：
+
+```bat
+.venv\Scripts\python.exe scripts\export_retrieval_units.py --input "var\chunks-exp01\chunks.jsonl" --security "security.json" --producer chapter_tree --output "var\retrieval-units-exp01"
+```
+
+学长输出使用同一命令，仅把 `--producer` 改为 `senior_strategy`。输出 `retrieval-units.jsonl`、`retrieval-parents.jsonl` 和 `manifest.json`。M2 只对前者的 `embedding_text` 向量化，命中后按命名空间内的 `parent_id` 取父块。适配器校验父子成员、重复 ID、空文本和来源定位；权限／密级缺失时失败关闭，不默认公开。
+
+## 稠密向量与 BM25 建库查询
+
+两路召回消费同一份 `retrieval-unit.v1`，但查询彼此独立，当前不做 RRF、权限过滤或 Agent 调用。先单独安装检索依赖；真实稠密检索需要 `sentence-transformers` 和可访问的嵌入模型，模型或依赖缺失会明确失败，不会用随机向量兜底：
+
+```bat
+.venv\Scripts\python.exe -m pip install -r requirements-retrieval.txt
+.venv\Scripts\python.exe scripts\build_retrieval_index.py --units "var\retrieval-units-exp01\retrieval-units.jsonl" --parents "var\retrieval-units-exp01\retrieval-parents.jsonl" --model "本地嵌入模型路径或模型ID" --device cpu --batch-size 16 --output "var\retrieval-index-exp01"
+```
+
+`--parents` 可省略，默认读取 units 同目录的 `retrieval-parents.jsonl`。输出目录必须为空。建库一次生成：
+
+```text
+embeddings.npy             # float32 向量矩阵，行序与 unit ID 文件一致
+embedding-unit-ids.json   # 向量行到知识单元的显式映射
+units.jsonl               # 命中后返回正文、来源与权限字段
+parents.jsonl             # 独立 parent 库，不向量化
+bm25-index.json           # 显式 postings、文档长度和 k1/b 参数
+manifest.json             # 模型 ID、维度、分词器、数量和完成标志
+```
+
+生产编码使用模型归一化向量，点积等价于余弦相似度，再做精确 Top-K；当前不是近似向量数据库。BM25 使用 Okapi 公式，默认 `k1=1.5、b=0.75`，中文生成单字和相邻二元词，英文、数字、连接词与版本号保留完整 token。`v2.1` 这类版本号会作为一个 token，不拆成 `v` 和 `2.1`。
+
+```bat
+.venv\Scripts\python.exe scripts\query_retrieval_index.py --index "var\retrieval-index-exp01" --query "增量更新如何生效" --mode dense --top-k 5 --device cpu
+.venv\Scripts\python.exe scripts\query_retrieval_index.py --index "var\retrieval-index-exp01" --query "增量更新如何生效" --mode bm25 --top-k 5
+```
+
+dense 查询从建库清单读取同一个嵌入模型；BM25 查询不加载嵌入模型。返回命中包含 `unit_id/score/rank`、child 文本、`parent_id`、标题路径、来源和权限字段，parent 正文不自动拼入结果。算法测试使用小型显式假向量验证矩阵、排序和数据流，不代表真实模型效果；真实模型的加载、精度和批量性能仍需使用实际模型与文档另行验证。
+
 ## 从已有 DocumentIR 离线生成知识单元
 
 单份 `document.json`、单文档 `results/` 目录均可：
@@ -254,7 +313,8 @@ ZIP/TAR 使用 `archive_security.py` 中的单一公开入口 `iter_archive_docu
 
 ## 验证状态与当前边界
 
-- 53 项无模型测试覆盖知识单元核心规则、坏引用、字节级确定性、独立与批量 CLI、主链接入、压缩包 BFS 与攻击拦截、核心管线、单栏/多栏/跨栏/单图环绕阅读顺序、顺序异常回退、原生绕过、CPU 真并行、页级并发、显存准入和顺序回收。
+- 当前全量回归为 106 项测试及 12 个子测试通过，覆盖知识单元、章节树、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序和两路索引查询。
+- 已用显式小型向量完成索引构建与 BM25 独立查询 CLI 冒烟；该结果只验证算法和数据流。真实 `sentence-transformers` 模型尚未在本次环境中完成加载、检索精度或批量性能验证。
 - 已用真实 TXT 输入完成 `run_parser.py --build-knowledge-units` 端到端样例，并完成 1 轮预热、2 轮正式计时的基准冒烟验证。
 - 已在 Windows、RTX 4070 Laptop 8GB 上完成单页真实模型冒烟：布局模型、VLM 和轻量 OCR 均成功加载，一页产生 8 条区域路由且全部由轻量 OCR 识别，阅读顺序状态为 `confirmed`。该次 VLM 只加载未参与识别；单页成功不等于多栏精度、整本速度或显存峰值已经验收。
 - 表格若返回未转换的 OTSL，会原样保存在 IR，并在 Markdown 的 `<pre>` 中展示，不伪装成 HTML 表格。
