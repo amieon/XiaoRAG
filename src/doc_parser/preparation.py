@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import locale
 import mimetypes
 import os
 from pathlib import Path
@@ -59,7 +60,7 @@ def detect_format(path: str | Path) -> str:
             return "tar"
     if suffix in {".7z", ".rar", ".iso", ".ofd"}:
         return suffix[1:]
-    if suffix in {".doc", ".ppt", ".xls"}:
+    if suffix in {".doc", ".ppt", ".pps", ".xls"}:
         return suffix[1:]
     if suffix in IMAGE_SUFFIXES:
         return "image"
@@ -191,6 +192,23 @@ def _extract_xlsx(path: Path) -> dict:
     return {"format": "xlsx", "sheets": sheets}
 
 
+def _read_legacy_text(path: Path) -> tuple[str, str]:
+    """文本严格按 BOM／UTF-8／GB18030 解码；不把替换字符静默写进知识库。"""
+    data = path.read_bytes()
+    # UTF-32LE 的 BOM 也以 FF FE 开头，必须先于 UTF-16 判断。
+    if data.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        return data.decode("utf-32"), "utf-32"
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16"), "utf-16"
+    for encoding in ("utf-8-sig", "gb18030"):
+        try:
+            return data.decode(encoding), encoding
+        except UnicodeDecodeError:
+            continue
+    # 保留明确失败：未知编码不能用 errors=replace 伪装成成功解析。
+    return data.decode("utf-8"), "utf-8"
+
+
 def _extract_native(path: Path, kind: str) -> dict:
     if kind == "docx":
         return _extract_docx(path)
@@ -201,8 +219,9 @@ def _extract_native(path: Path, kind: str) -> dict:
     if kind == "json":
         return {"format": "json", "value": json.loads(path.read_text(encoding="utf-8-sig"))}
     if kind == "text":
-        return {"format": "text", "text": path.read_text(encoding="utf-8-sig")}
-    if kind in {"doc", "ppt", "xls"}:
+        text, encoding = _read_legacy_text(path)
+        return {"format": "text", "text": text, "encoding": encoding}
+    if kind in {"doc", "ppt", "pps", "xls"}:
         return {"format": kind, "extraction": "office_to_pdf_text_layer"}
     return {"format": kind}
 
@@ -305,6 +324,19 @@ def _attach_docx_native_structure(native_blocks: list[dict], native: dict) -> li
     return native_blocks
 
 
+def _decode_process_output(value: bytes | str | None) -> str:
+    """LibreOffice 在中文 Windows 上可能输出 GBK；诊断日志不能使转换任务崩溃。"""
+    if value is None or isinstance(value, str):
+        return value or ""
+    encodings = list(dict.fromkeys([locale.getpreferredencoding(False), "utf-8", "gb18030"]))
+    for encoding in encodings:
+        try:
+            return value.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return value.decode("utf-8", errors="replace")
+
+
 def _render_office(source: Path, staging: Path, converter: str | None) -> Path:
     executable = converter or os.environ.get("DOCUMENT_OFFICE_CONVERTER") or shutil.which("libreoffice") or shutil.which("soffice")
     if not executable:
@@ -316,10 +348,11 @@ def _render_office(source: Path, staging: Path, converter: str | None) -> Path:
         executable, f"-env:UserInstallation={profile.as_uri()}", "--headless",
         "--convert-to", "pdf", "--outdir", str(staging), str(source),
     ]
-    completed = subprocess.run(command, capture_output=True, text=True, timeout=180, check=False)
+    # 捕获原始字节，由 _decode_process_output 处理 Windows 本地编码。
+    completed = subprocess.run(command, capture_output=True, timeout=180, check=False)
     target = staging / f"{source.stem}.pdf"
     if completed.returncode or not target.is_file():
-        detail = (completed.stderr or completed.stdout).strip()
+        detail = (_decode_process_output(completed.stderr) or _decode_process_output(completed.stdout)).strip()
         raise RuntimeError(f"Office to PDF conversion failed for {source.name}: {detail or completed.returncode}")
     return target
 
@@ -456,7 +489,7 @@ def _prepare_leaf(source: str | Path, output: str | Path, *, dpi: int = 150,
             pdf_for_pages = source
             office_generated = False
             with tempfile.TemporaryDirectory(prefix="document-orchestrator-") as temp_dir:
-                if kind in {"docx", "pptx", "xlsx", "doc", "ppt", "xls"}:
+                if kind in {"docx", "pptx", "xlsx", "doc", "ppt", "pps", "xls"}:
                     pdf_for_pages = _render_office(source, Path(temp_dir), office_converter)
                     office_generated = True
                 if kind == "pdf" or office_generated or kind in {"doc", "ppt", "xls"}:
@@ -514,7 +547,7 @@ def _prepare_leaf(source: str | Path, output: str | Path, *, dpi: int = 150,
                                                   "image": relative_image,
                                                   "package": (page_dir / "page.json").relative_to(output).as_posix(),
                                                   "native_block_count": 0})
-                elif kind not in {"pdf", "docx", "pptx", "xlsx", "doc", "ppt", "xls"}:
+                elif kind not in {"pdf", "docx", "pptx", "xlsx", "doc", "ppt", "pps", "xls"}:
                     raise RuntimeError(f"Format {kind} has no configured page renderer")
             manifest["native_path"] = "native/objects.json"
         manifest["page_count"] = len(manifest["pages"])

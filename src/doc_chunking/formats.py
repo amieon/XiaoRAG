@@ -27,7 +27,7 @@ def _format(ir, native, manifest):
             if isinstance(value, str):
                 normalized = value.lower().lstrip(".")
                 normalized = mime_formats.get(normalized.split(";", 1)[0].strip(), normalized)
-                if normalized in {"pptx", "ppt", "dps", "xlsx", "xls", "et", "csv"}:
+                if normalized in {"pptx", "ppt", "pps", "dps", "xlsx", "xls", "et", "csv"}:
                     return normalized
     return None
 
@@ -487,7 +487,7 @@ def format_groups(blocks, ir, native, source_manifest, config):
     config = config if isinstance(config, dict) else {}
     options = config.get("formats") or {}
     fmt = _format(ir, native, source_manifest)
-    if fmt in {"pptx", "ppt", "dps"} or (not fmt and blocks and all(block.get("unit_type") == "slide" for block in blocks)):
+    if fmt in {"pptx", "ppt", "pps", "dps"} or (not fmt and blocks and all(block.get("unit_type") == "slide" for block in blocks)):
         from .preprocess import _exclusion, _toc_units, NOTE_KINDS
         toc_units = _toc_units(ir)
         body = [block for block in blocks if _exclusion(block, toc_units, config.get("preprocess") or {}) is None

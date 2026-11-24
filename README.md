@@ -70,6 +70,8 @@ py -m venv .venv
 
 `--prepare-only` 不加载任何模型。它仍会生成页图、原生对象、页包和 DocumentIR。纯文本、JSON、DOCX、PPTX、XLSX 等可保留原生正文；只有视觉页骨架时还没有可构建的正文块。
 
+TXT/CSV/Markdown 等纯文本按 BOM、UTF-8、GB18030 顺序严格解码，并在 `native/objects.json` 的 `encoding` 记录实际编码；未知编码仍明确失败，不使用替换字符制造乱码。旧 Office（`.doc/.ppt/.pps/.xls`）不是由 Python 库直接读取二进制正文，而是通过 LibreOffice 转 PDF，再抽取文字层并保留页图；`.pps` 是老 PowerPoint 放映格式。LibreOffice 控制台输出按原始字节捕获，再按本地编码、UTF-8、GB18030 解码，避免中文 Windows 的转换日志导致 `UnicodeDecodeError`。
+
 ## 完整识别并生成知识单元
 
 先安装与本机 CUDA 匹配的 PaddlePaddle，再安装固定版本适配器依赖。Windows/CUDA 12.9 的已验证示例为：
@@ -313,7 +315,7 @@ ZIP/TAR 使用 `archive_security.py` 中的单一公开入口 `iter_archive_docu
 
 ## 验证状态与当前边界
 
-- 当前全量回归为 106 项测试及 12 个子测试通过，覆盖知识单元、章节树、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序和两路索引查询。
+- 当前全量回归为 109 项测试及 12 个子测试通过，覆盖知识单元、章节树、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序和两路索引查询。
 - 已用显式小型向量完成索引构建与 BM25 独立查询 CLI 冒烟；该结果只验证算法和数据流。真实 `sentence-transformers` 模型尚未在本次环境中完成加载、检索精度或批量性能验证。
 - 已用真实 TXT 输入完成 `run_parser.py --build-knowledge-units` 端到端样例，并完成 1 轮预热、2 轮正式计时的基准冒烟验证。
 - 已在 Windows、RTX 4070 Laptop 8GB 上完成单页真实模型冒烟：布局模型、VLM 和轻量 OCR 均成功加载，一页产生 8 条区域路由且全部由轻量 OCR 识别，阅读顺序状态为 `confirmed`。该次 VLM 只加载未参与识别；单页成功不等于多栏精度、整本速度或显存峰值已经验收。
