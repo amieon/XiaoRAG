@@ -48,6 +48,13 @@ def main() -> None:
                     raise ValueError(f"chunks JSONL 第 {line_no} 行无效：{exc}") from exc
         security = json.loads(args.security.read_text(encoding="utf-8-sig"))
         result = adapt_structural_chunks(chunks, security=security, producer=args.producer)
+        chunking_values = {
+            json.dumps(chunk.get("metadata", {}).get("chunking"), ensure_ascii=False, sort_keys=True)
+            for chunk in chunks
+        }
+        if len(chunking_values) != 1:
+            raise ValueError("chunks_inconsistent_chunking_configuration")
+        chunking = json.loads(chunking_values.pop())
     except (ValueError, UnicodeError, OSError, json.JSONDecodeError) as exc:
         parser.error(str(exc))
         return
@@ -60,6 +67,7 @@ def main() -> None:
         "source_chunks_sha256": hashlib.sha256(raw).hexdigest(),
         "unit_count": len(result["retrieval_units"]), "parent_count": len(result["parents"]),
         "embedding_field": "embedding_text", "vectorization_performed": False,
+        "chunking": chunking,
         "retrieval_weight_training_performed": False,
         "self_check": result["self_check"],
     })

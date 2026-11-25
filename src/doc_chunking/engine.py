@@ -1,6 +1,7 @@
 """章节树分组与两层父子块输出；普通文档不再整篇四选一。"""
 from __future__ import annotations
 
+from bisect import bisect_right
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any
 from chapter_tree.tree import ChapterTreeConfig, build_chapter_tree
 from chapter_tree.groups import chapter_tree_to_groups
 
+from .cdc import split_cdc
 from .model import normalize_document, unique_refs
 from .prepare import prepare_document
 
@@ -31,36 +33,19 @@ def validate_config(config):
         if not isinstance(config.get(section), dict):
             raise ValueError("missing_configuration_section_" + section)
     sizing = config["sizing"]
-    for name in ("target_chars", "max_chars"):
+    for name in ("min_chars", "target_chars", "max_chars", "window_chars"):
         if type(sizing.get(name)) is not int or sizing[name] <= 0:
             raise ValueError("invalid_" + name)
-    if sizing["target_chars"] > sizing["max_chars"]:
-        raise ValueError("target_exceeds_max_chars")
+    if not sizing["min_chars"] <= sizing["target_chars"] <= sizing["max_chars"]:
+        raise ValueError("cdc_requires_min_target_max_order")
+    if type(sizing.get("boundary_snap_chars")) is not int or sizing["boundary_snap_chars"] < 0:
+        raise ValueError("invalid_boundary_snap_chars")
+    if sizing.get("algorithm") != "cdc-natural-text-v1":
+        raise ValueError("unsupported_chunking_algorithm")
     if sizing.get("length_unit") != "unicode_codepoints" or sizing.get("overlap") != 0:
         raise ValueError("chapter_tree_requires_character_lengths_and_zero_overlap")
     if type(config.get("clause_boundaries", True)) is not bool:
         raise ValueError("invalid_clause_boundaries")
-
-
-def split_prose(text, max_chars):
-    if len(text) <= max_chars:
-        return [(0, len(text), "whole_block")]
-    boundaries = sorted({m.end() for m in re.finditer(r"[。！？；;!?]\s*|\.\s+|\n+", text)})
-    result, start = [], 0
-    while start < len(text):
-        if len(text) - start <= max_chars:
-            end, reason = len(text), "sentence_tail"
-        else:
-            candidates = [value for value in boundaries if start < value <= start + max_chars]
-            if candidates:
-                end, reason = candidates[-1], "sentence_boundary"
-            else:
-                spaces = [m.end() + start for m in re.finditer(r"\s+", text[start:start + max_chars])]
-                end = spaces[-1] if spaces else start + max_chars
-                reason = "whitespace_boundary" if spaces else "hard_character_boundary"
-        result.append((start, end, reason))
-        start = end
-    return result
 
 
 def _fragment(block, start, end, reason):
@@ -103,56 +88,119 @@ def _clause_label(block):
     return f"第{match.group(1)}条" if match else None
 
 
+def _cdc_text_unit(unit):
+    """章节标题可与正文一起打包；列表、公式及其他原子 IR 块不进入 CDC。"""
+    return all(
+        block["kind"] in ("paragraph", "text", "body", "heading", "section_heading", "document_title")
+        and not _is_list_unit(block)
+        and not (block.get("metadata") or {}).get("list_continuation")
+        and not (block.get("metadata") or {}).get("math")
+        for block in unit
+    )
+
+
+def _cdc_segment_parts(units, sizing, clause_path):
+    """在连续正文上切分，再把全局区间映射回原始 IR 块，证据不丢字、不重叠。"""
+    blocks = [block for unit in units for block in unit]
+    layout, cursor = [], 0
+    for block in blocks:
+        end = cursor + len(block["text"])
+        layout.append((block, cursor, end))
+        cursor = end + 2  # children 渲染时仍使用 \n\n 连接原始块。
+    text = "\n\n".join(block["text"] for block in blocks)
+    block_starts = [item[1] for item in layout]
+    parts = []
+    for start, end, reason in split_cdc(text, sizing):
+        fragments = []
+        index = max(0, bisect_right(block_starts, start) - 1)
+        while index < len(layout) and layout[index][1] < end:
+            block, block_start, block_end = layout[index]
+            left, right = max(start, block_start), min(end, block_end)
+            if left < right:
+                fragments.append(_fragment(block, left - block_start, right - block_start, reason))
+            index += 1
+        if not fragments:
+            raise ValueError("cdc_range_has_no_source_text")
+        parts.append({
+            "blocks": fragments, "text": None,
+            "split_reasons": sorted({block["split_reason"] for block in fragments}),
+            "clause_path": clause_path,
+        })
+    return parts
+
+
 def _child_parts(group, config):
     if group.get("text_override") is not None or group.get("atomic"):
         return [{"blocks": group["blocks"], "text": group.get("text_override"),
                  "split_reasons": ["atomic_structural_unit"], "clause_path": group.get("clause_path", [])}]
-    maximum = config["sizing"]["max_chars"]
-    # _atomic_units 的普通正文硬上限必须使用配置，而不是固定值。
     units = []
     for block in group["blocks"]:
-        metadata = block.get("metadata") or {}
         if _is_list_unit(block):
             units.append([dict(block, split_reason="atomic_list_item")])
         elif units and _is_list_unit(units[-1][0]) and _is_explicit_list_continuation(block, units[-1]):
             units[-1].append(dict(block, split_reason="explicit_list_continuation"))
-        elif block["kind"] in ("paragraph", "text", "body") and not metadata.get("math"):
-            units.extend([_fragment(block, a, b, reason)] for a, b, reason in split_prose(block["text"], maximum))
+        elif _cdc_text_unit([block]):
+            units.append([dict(block, split_reason="source_block")])
         else:
             units.append([dict(block, split_reason="atomic_ir_block")])
 
-    target = config["sizing"]["target_chars"]
+    # 先保留条款及原子单元边界；连续普通正文段内部不再按 target 贪心错位。
+    segments, pending = [], []
+    mode, current_clause = None, None
     clause_enabled = config.get("clause_boundaries", True)
-    parts, pending, length, current_clause = [], [], 0, None
 
-    def flush():
-        nonlocal pending, length
+    def flush_segment():
+        nonlocal pending, mode, current_clause
         if pending:
-            parts.append({
-                "blocks": pending, "text": None,
-                "split_reasons": sorted({block["split_reason"] for block in pending}),
+            segments.append({
+                "units": pending, "cdc": mode,
                 "clause_path": [current_clause] if current_clause else [],
             })
-            pending, length = [], 0
+        pending, mode, current_clause = [], None, None
 
     for unit in units:
         label = _clause_label(unit[0]) if clause_enabled else None
         if label and pending:
-            # 章节标题不单独占一个 child，跟随其下第一个条款；已有正文才切边界。
             only_headings = all(
                 (block.get("metadata") or {}).get("chapter_tree", {}).get("is_section_heading") is True
-                for block in pending
+                for pending_unit in pending for block in pending_unit
             )
             if not only_headings:
-                flush()
+                flush_segment()
+        unit_mode = _cdc_text_unit(unit)
+        if pending and unit_mode != mode:
+            flush_segment()
+        if not pending:
+            mode = unit_mode
         if label:
             current_clause = label
-        size = sum(len(block["text"]) for block in unit) + 2 * (len(unit) - 1)
-        if pending and length + size + 2 > target:
-            flush()
-        pending.extend(unit)
-        length += size + (2 if length else 0)
-    flush()
+        pending.append(unit)
+    flush_segment()
+
+    parts, target = [], config["sizing"]["target_chars"]
+    for segment in segments:
+        if segment["cdc"]:
+            parts.extend(_cdc_segment_parts(segment["units"], config["sizing"], segment["clause_path"]))
+            continue
+        pending, length = [], 0
+
+        def flush_atomic_run():
+            nonlocal pending, length
+            if pending:
+                parts.append({
+                    "blocks": pending, "text": None,
+                    "split_reasons": sorted({block["split_reason"] for block in pending}),
+                    "clause_path": segment["clause_path"],
+                })
+                pending, length = [], 0
+
+        for unit in segment["units"]:
+            size = sum(len(block["text"]) for block in unit) + 2 * (len(unit) - 1)
+            if pending and length + size + 2 > target:
+                flush_atomic_run()
+            pending.extend(unit)
+            length += size + (2 if length else 0)
+        flush_atomic_run()
     return parts
 
 
@@ -203,6 +251,7 @@ def _chunk_record(document_id, chunk_id, level, parent_id, group, blocks, text, 
             "split_reasons": list(reasons),
             "oversize_character_budget": len(full) > config["sizing"]["max_chars"],
             "token_limit_verified": False,
+            "chunking": deepcopy(config["sizing"]),
             "body_rendering": "format_override" if group.get("text_override") is not None else "ir_blocks",
             "body_parts": body_parts if group.get("text_override") is None else [],
             "block_metadata": block_metadata,

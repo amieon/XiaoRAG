@@ -20,7 +20,8 @@ src/chapter_tree/
   tree.py                 # 原生／上游标题与显式编号构建确定性章节树
   groups.py               # 章节树转两层父子分块可消费的 flat groups
 src/doc_chunking/
-  engine.py               # 章节树 groups → parent/child，列表与条款约束子块
+  cdc.py                  # 有界滚动哈希、内容定义候选点与自然边界吸附
+  engine.py               # 章节树 groups → parent/child，CDC 映射原块及列表条款约束
   validation.py           # 父子关系、正文切片、来源与字符区间硬校验
 src/hybrid_retrieval/
   adapter.py              # 混合检索输入：structural-chunk.v1 → 统一检索单元与 parent 库
@@ -171,7 +172,11 @@ DOCX 自动编号列表另从 OOXML `numPr/numbering.xml` 提取，保存到 `li
 
 ## 章节树生成两层父子块
 
-普通文档不再对整篇执行 `clause/section/item/paragraph` 四选一：章节树决定 group 和完整 parent，child 默认按 800／1600 Unicode 字符软预算组合。DOCX 自动列表项及显式续段、表格、公式和代码作为原子单元；明确的“第一条／第二条”只作为 child 的优先边界和 `clause_path`，不额外伪造章节或 parent。章节标题会跟随其下第一个条款，不单独形成标题 child。
+普通文档不再对整篇执行 `clause/section/item/paragraph` 四选一：章节树决定 group 和完整 parent。连续普通正文不再按 800 字贪心错位，而是整体运行 `cdc-natural-text-v1`：32 个 Unicode 字符的有界滚动哈希产生内容定义候选点，再向前后 64 字符内的自然边界吸附。默认最小／目标／最大长度为 400／800／1600 Unicode 字符；候选点不保证恰好间隔 800 字，1600 是没有合适边界时的普通正文硬上限。
+
+自然边界依次为空行、句末标点、单个换行、逗号／顿号／冒号；英文句点只有伴随空白或文本结尾时才作为句末，`v2.1`、`3.14` 不会被当成句号。达到最大长度仍无候选点时，从目标到上限之间选择最后一个最强自然边界，完全没有才硬切并记录 `cdc_hard_character_boundary`。CDC 每版独立重算，不读取旧切点，也不保存滚动哈希历史。
+
+DOCX 自动列表项及显式续段、表格、公式和代码保持原子单元；明确的“第一条／第二条”仍是 child 的优先边界和 `clause_path`，不额外伪造章节或 parent。章节标题跟随其下第一个条款，不单独形成标题 child。CDC 区间会映射回一个或多个原 IR 块，保留 `logical_text_span` 和证据字符区间；标点和原始正文均不丢弃。
 
 ```bat
 .venv\Scripts\python.exe scripts\build_chunks.py --input "var\parsed\results\document.json" --output "var\chunks-exp01" --mode native
@@ -198,7 +203,7 @@ DOCX 自动编号列表另从 OOXML `numPr/numbering.xml` 提取，保存到 `li
 .venv\Scripts\python.exe scripts\export_retrieval_units.py --input "var\chunks-exp01\chunks.jsonl" --security "security.json" --producer chapter_tree --output "var\retrieval-units-exp01"
 ```
 
-学长输出使用同一命令，仅把 `--producer` 改为 `senior_strategy`。输出 `retrieval-units.jsonl`、`retrieval-parents.jsonl` 和 `manifest.json`。M2 只对前者的 `embedding_text` 向量化，命中后按命名空间内的 `parent_id` 取父块。适配器校验父子成员、重复 ID、空文本和来源定位；权限／密级缺失时失败关闭，不默认公开。
+学长输出使用同一命令，仅把 `--producer` 改为 `senior_strategy`。输出 `retrieval-units.jsonl`、`retrieval-parents.jsonl` 和 `manifest.json`；清单中的 `chunking` 保存完整切分算法、长度单位和参数，供版本快照审计。M2 只对前者的 `embedding_text` 向量化，命中后按命名空间内的 `parent_id` 取父块。适配器校验父子成员、重复 ID、空文本和来源定位；权限／密级缺失时失败关闭，不默认公开。
 
 ### 合并多文档建库语料
 
@@ -332,7 +337,7 @@ knowledge-version-store/
 
 parent 的 `parent_key` 来自 `producer + title_path + 同路径出现序号`，空标题路径记为 `<root>`；child 的 `unit_key` 只是 parent 内的顺序坐标。当前不把它当作可靠语义身份，也不做复杂单元匹配。向量复用只看 `content_hash + embedding_model`：正文相同且模型相同，即使 child 移动到其他 parent，也原样复用上一版的 `vector_ref`；正文变化、新增或换模型则生成新 `vector_id`。同版重复正文只编码一次，其他文档已写入全局向量池的相同正文也可复用。
 
-`vector_ref` 显式记录后端、存储格式、模型、`vector_id` 和相对路径；版本只保存完整快照，不保存 diff、JSON Patch 或 `changes.json`，需要比较时现场计算。当前尚未实现 CDC、分支 merge、Milvus／pgvector 的版本索引同步，也不把本地 NPY 向量池伪装成线上向量数据库。若编码或校验失败，不提交新版本；全局内容寻址向量可能留下未被版本引用的缓存，可按引用情况另行回收。
+`vector_ref` 显式记录后端、存储格式、模型、`vector_id` 和相对路径；版本只保存完整快照，不保存 diff、JSON Patch 或 `changes.json`，需要比较时现场计算。版本发布不会再次切块，而是消费 `build_chunks.py` 已经生成的 CDC children，并把导出清单中的 `chunking` 配置原样写入版本 manifest。因此局部文字修改后，远处内容相同的 child 可以继续按哈希复用向量。当前尚未实现分支 merge、Milvus／pgvector 的版本索引同步，也不把本地 NPY 向量池伪装成线上向量数据库。若编码或校验失败，不提交新版本；全局内容寻址向量可能留下未被版本引用的缓存，可按引用情况另行回收。
 
 清单中的 `reused_from_previous_count` 和 `reused_from_global_count` 按 child 数统计，`newly_encoded_text_count` 按实际编码的去重正文数统计。源文件未变时直接沿用当前版本清单，因此即使命令指定另一个模型，也不会为相同源文件制造新版本。
 
@@ -433,7 +438,8 @@ ZIP/TAR 使用 `archive_security.py` 中的单一公开入口 `iter_archive_docu
 
 ## 验证状态与当前边界
 
-- 当前全量回归为 129 项测试及 12 个子测试通过，覆盖知识单元、章节树、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序、两路索引查询和版本发布／向量复用。
+- 当前全量回归为 134 项测试及 12 个子测试通过，覆盖知识单元、章节树、CDC 与自然边界、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序、两路索引查询和版本发布／向量复用。
+- CDC 冒烟样例将 80 个短句切成 14 个 child；只在开头编号增加一个字符后，第一个 child 改变，后续 13 个 child 正文完全不变。对应版本发布只编码 1 个新 child，其余 13 个 `vector_ref` 完全复用。该样例验证局部稳定性与数据流，不代表所有文档都只会改变一个块。
 - 已用显式小型向量完成索引构建、BM25 独立查询及版本发布 CLI 冒烟，并用真实 Milvus Lite 文件库完成 FLAT+COSINE 建库、加载和 Top-K 查询；这些结果只验证算法和存储数据流。真实 `sentence-transformers` 模型尚未在本次环境中完成加载、检索精度或批量性能验证。
 - 已用真实 TXT 输入完成 `run_parser.py --build-knowledge-units` 端到端样例，并完成 1 轮预热、2 轮正式计时的基准冒烟验证。
 - 已在 Windows、RTX 4070 Laptop 8GB 上完成单页真实模型冒烟：布局模型、VLM 和轻量 OCR 均成功加载，一页产生 8 条区域路由且全部由轻量 OCR 识别，阅读顺序状态为 `confirmed`。该次 VLM 只加载未参与识别；单页成功不等于多栏精度、整本速度或显存峰值已经验收。

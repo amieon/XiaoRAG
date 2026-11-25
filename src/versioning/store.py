@@ -180,7 +180,7 @@ def publish_version(
     if not isinstance(model_id, str) or not model_id:
         raise ValueError("versioning_embedder_model_id_required")
     source_sha256 = _sha256_file(source)
-    _, units, parents = _read_export(export_dir)
+    export_manifest, units, parents = _read_export(export_dir)
     document_key = _document_key(source)
     document_root = store / "documents" / document_key
     document_root.mkdir(parents=True, exist_ok=True)
@@ -257,6 +257,7 @@ def publish_version(
             "revision": revision, "version_id": version_id,
             "previous_version_id": current["version_id"] if current else None,
             "snapshot_complete": True, "diff_persisted": False,
+            "chunking": export_manifest.get("chunking"),
             "unit_count": len(versioned_units), "parent_count": len(versioned_parents),
             "embedding_model": model_id, "vector_store": VECTOR_STORE_VERSION,
             "reused_from_previous_count": reused_previous,

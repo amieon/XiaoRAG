@@ -12,9 +12,13 @@
     "excel_header_mode": "first_candidate"
   },
   "sizing": {
+    "algorithm": "cdc-natural-text-v1",
     "length_unit": "unicode_codepoints",
+    "min_chars": 400,
     "target_chars": 800,
     "max_chars": 1600,
+    "window_chars": 32,
+    "boundary_snap_chars": 64,
     "overlap": 0
   },
   "clause_boundaries": true
