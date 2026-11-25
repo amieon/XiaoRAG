@@ -31,6 +31,8 @@ src/hybrid_retrieval/
   merge.py                # 多文档／双 producer 导出合并与全局父子关系校验
   pgvector_store.py       # 可选 pgvector dense 导入与精确余弦 Top-K
   milvus_store.py         # 可选 Milvus FLAT+COSINE collection 与 dense 查询
+src/versioning/
+  store.py                # 路径定文档、线性完整快照、内容寻址向量与增量复用
 src/doc_parser/
   preparation.py          # 格式识别、原生抽取、Office/PDF/图片页包
   docx_numbering.py       # OOXML 自动编号列表、层级与序号提取
@@ -60,6 +62,7 @@ scripts/
   query_dense_pgvector.py      # 独立查询 pgvector dense Top-K
   store_dense_vector.py        # --backend pgvector|milvus 统一向量入库
   query_dense_vector.py        # --backend pgvector|milvus 统一 dense 查询
+  publish_document_version.py  # 发布单文档线性版本并复用不变 child 的向量
 config/
   parser.json             # 路由、识别和并行参数
   knowledge_units.json    # 知识单元切分与复核参数
@@ -300,6 +303,39 @@ set MILVUS_URI=var\milvus\retrieval.db
 .venv\Scripts\python.exe scripts\query_dense_vector.py --backend pgvector --name retrieval_exp01 --query "增量更新如何生效" --top-k 5
 ```
 
+## 版本与增量管理：完整快照与向量复用
+
+当前实现的是普通线性版本：同一规范化绝对路径对应同一个 `document_key`，源文件 SHA-256 变化时发布下一 `revision`，从 `r000000` 开始；路径和内容都未变则返回 `status=unchanged`，不创建版本，也不编码。移动或改名默认是新文档，后续若需保留身份应显式换绑，不能仅凭内容猜测。
+
+每次发布消费一份单文档 `retrieval-preparation.v1` 导出，并保存完整源文件、全部 units／parents 和清单：
+
+```bat
+.venv\Scripts\python.exe scripts\publish_document_version.py --source "受管文档.docx" --input "var\retrieval-units-exp01" --store "var\knowledge-version-store" --model "本地嵌入模型路径或模型ID" --device cpu --batch-size 16
+```
+
+版本库结构如下：
+
+```text
+knowledge-version-store/
+  vectors/
+    vec_<模型与正文哈希>.npy     # 跨文档共享的不可变内容寻址向量
+  documents/<document_key>/
+    current.json                 # 原子替换的当前版本指针
+    versions/r000000/
+      source/original.docx
+      retrieval-units.jsonl
+      retrieval-parents.jsonl
+      manifest.json
+    versions/r000001/
+      ...
+```
+
+parent 的 `parent_key` 来自 `producer + title_path + 同路径出现序号`，空标题路径记为 `<root>`；child 的 `unit_key` 只是 parent 内的顺序坐标。当前不把它当作可靠语义身份，也不做复杂单元匹配。向量复用只看 `content_hash + embedding_model`：正文相同且模型相同，即使 child 移动到其他 parent，也原样复用上一版的 `vector_ref`；正文变化、新增或换模型则生成新 `vector_id`。同版重复正文只编码一次，其他文档已写入全局向量池的相同正文也可复用。
+
+`vector_ref` 显式记录后端、存储格式、模型、`vector_id` 和相对路径；版本只保存完整快照，不保存 diff、JSON Patch 或 `changes.json`，需要比较时现场计算。当前尚未实现 CDC、分支 merge、Milvus／pgvector 的版本索引同步，也不把本地 NPY 向量池伪装成线上向量数据库。若编码或校验失败，不提交新版本；全局内容寻址向量可能留下未被版本引用的缓存，可按引用情况另行回收。
+
+清单中的 `reused_from_previous_count` 和 `reused_from_global_count` 按 child 数统计，`newly_encoded_text_count` 按实际编码的去重正文数统计。源文件未变时直接沿用当前版本清单，因此即使命令指定另一个模型，也不会为相同源文件制造新版本。
+
 ## 从已有 DocumentIR 离线生成知识单元
 
 单份 `document.json`、单文档 `results/` 目录均可：
@@ -397,8 +433,8 @@ ZIP/TAR 使用 `archive_security.py` 中的单一公开入口 `iter_archive_docu
 
 ## 验证状态与当前边界
 
-- 当前全量回归为 119 项测试及 12 个子测试通过，覆盖知识单元、章节树、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序和两路索引查询。
-- 已用显式小型向量完成索引构建与 BM25 独立查询 CLI 冒烟，并用真实 Milvus Lite 文件库完成 FLAT+COSINE 建库、加载和 Top-K 查询；这些结果只验证算法和存储数据流。真实 `sentence-transformers` 模型尚未在本次环境中完成加载、检索精度或批量性能验证。
+- 当前全量回归为 129 项测试及 12 个子测试通过，覆盖知识单元、章节树、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序、两路索引查询和版本发布／向量复用。
+- 已用显式小型向量完成索引构建、BM25 独立查询及版本发布 CLI 冒烟，并用真实 Milvus Lite 文件库完成 FLAT+COSINE 建库、加载和 Top-K 查询；这些结果只验证算法和存储数据流。真实 `sentence-transformers` 模型尚未在本次环境中完成加载、检索精度或批量性能验证。
 - 已用真实 TXT 输入完成 `run_parser.py --build-knowledge-units` 端到端样例，并完成 1 轮预热、2 轮正式计时的基准冒烟验证。
 - 已在 Windows、RTX 4070 Laptop 8GB 上完成单页真实模型冒烟：布局模型、VLM 和轻量 OCR 均成功加载，一页产生 8 条区域路由且全部由轻量 OCR 识别，阅读顺序状态为 `confirmed`。该次 VLM 只加载未参与识别；单页成功不等于多栏精度、整本速度或显存峰值已经验收。
 - 表格若返回未转换的 OTSL，会原样保存在 IR，并在 Markdown 的 `<pre>` 中展示，不伪装成 HTML 表格。
