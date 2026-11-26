@@ -47,6 +47,10 @@ def _content(payload: dict[str, Any]) -> str:
     if not isinstance(content, str) or not content.strip():
         reasoning = message.get("reasoning_content")
         reasoning_chars = len(reasoning) if isinstance(reasoning, str) else 0
+        if isinstance(reasoning, str) and reasoning.strip():
+            # 部分兼容服务忽略 disable_thinking，并把最终 JSON 放进 reasoning_content。
+            # 后续仍执行完整 JSON/schema 校验，普通推理文本不会被接受为预测。
+            return reasoning.strip()
         usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
         completion_tokens = usage.get("completion_tokens", "unknown")
         finish_reason = choice.get("finish_reason")

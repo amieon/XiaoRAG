@@ -89,27 +89,35 @@ class ZeroShotHeadingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown block_id"):
             classifier.predict([example("doc_p0001_b0000", "无编号标题")])
 
-    def test_empty_reasoning_response_has_actionable_diagnostic(self):
+    def test_reasoning_fallback_accepts_only_valid_prediction_json(self):
         def reasoning_only(payload):
             self.assertEqual(payload["max_tokens"], 8192)
             self.assertFalse(payload["enable_thinking"])
             self.assertFalse(payload["chat_template_kwargs"]["enable_thinking"])
+            response = response_for(payload)
             return {
-                "choices": [{"finish_reason": "length", "message": {
-                    "content": "", "reasoning_content": "正在分析标题……",
+                "choices": [{"finish_reason": "stop", "message": {
+                    "content": "",
+                    "reasoning_content": response["choices"][0]["message"]["content"],
                 }}],
-                "usage": {"completion_tokens": 8192},
+                "usage": {"completion_tokens": 66},
             }
 
         classifier = OpenAICompatibleHeadingClassifier(
             base_url="http://localhost/v1", model="fake-reasoner",
             max_tokens=8192, disable_thinking=True, transport=reasoning_only,
         )
-        with self.assertRaisesRegex(ValueError, r"reasoning_chars=[1-9][0-9]*") as captured:
+        rows = classifier.predict([example("doc_p0001_b0000", "无编号标题")])
+        self.assertEqual(rows[0]["block_id"], "doc_p0001_b0000")
+        self.assertEqual(rows[0]["label"], "heading")
+
+        classifier.transport = lambda payload: {
+            "choices": [{"finish_reason": "stop", "message": {
+                "content": "", "reasoning_content": "这里只是思考，不是最终JSON",
+            }}],
+        }
+        with self.assertRaisesRegex(ValueError, "did not return valid JSON"):
             classifier.predict([example("doc_p0001_b0000", "无编号标题")])
-        self.assertIn("finish_reason='length'", str(captured.exception))
-        self.assertIn("completion_tokens=8192", str(captured.exception))
-        self.assertIn("--disable-thinking", str(captured.exception))
 
     def test_response_format_can_be_disabled(self):
         def transport(payload):

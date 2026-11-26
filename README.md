@@ -169,7 +169,7 @@ $env:HEADING_MODEL_API_KEY = '你的密钥'
 
 API 密钥只能放当前终端或权限受限的本地 `.env`，不得写入命令行参数、脚本、清单或 Git。零样本结果中的 `confidence/scores` 仍为 `null`，不将模型自报数值当作校准概率。
 
-默认每次请求设置 `max_tokens=4096`。思考模型若只返回 `reasoning_content` 而 `content` 为空，可提高 `--max-tokens 8192`，并在 Qwen 兼容服务上使用 `--disable-thinking`；空响应错误会记录 `finish_reason`、思考字符数和完成 token 数，不保存密钥。服务不支持 JSON 模式时使用 `--without-response-format`；若服务拒绝思考扩展字段，则去掉 `--disable-thinking`，不要混用失败实验的输出目录。
+默认每次请求设置 `max_tokens=4096`。思考模型若只返回 `reasoning_content` 而 `content` 为空，可提高 `--max-tokens 8192`，并在 Qwen 兼容服务上使用 `--disable-thinking`。对于忽略关闭思考开关的服务，程序会尝试读取 `reasoning_content`，但其中必须是合法预测 JSON，并继续通过块覆盖、短 ID 和层级校验；普通推理文字不会被接受。服务不支持 JSON 模式时使用 `--without-response-format`；若服务拒绝思考扩展字段，则去掉 `--disable-thinking`，不要混用失败实验的输出目录。
 
 上游 `raw_label` 可以辅助预标注，但若直接把它当全部真值，模型最多学习复现上游判断；要纠正标题误判，仍需人工复核和独立测试文档。
 
