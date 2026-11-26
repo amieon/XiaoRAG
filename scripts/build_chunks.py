@@ -30,6 +30,10 @@ def main() -> None:
     parser.add_argument("--config", type=Path, help="默认 src/doc_chunking/config.json")
     parser.add_argument("--mode", choices=("native", "upstream", "hybrid"), default="hybrid")
     parser.add_argument("--predictions", type=Path, help="可选：zero-shot/transformer 标题预测 JSONL")
+    parser.add_argument(
+        "--flat-headings", action="store_true",
+        help="重放 hierarchy-mode=none：所有标题（含原生标题）平铺为一级",
+    )
     parser.add_argument("--no-numbered-promotion", action="store_true")
     args = parser.parse_args()
     if not args.input.is_file() or args.input.suffix.lower() != ".json":
@@ -44,6 +48,7 @@ def main() -> None:
         tree_config = ChapterTreeConfig(
             heading_mode=args.mode,
             promote_numbered_headings=not args.no_numbered_promotion,
+            flat_headings=args.flat_headings,
         )
         predictions = None
         if args.predictions:

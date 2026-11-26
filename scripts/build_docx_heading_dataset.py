@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from chapter_tree.groups import chapter_groups_document
+from chapter_tree.heading_hierarchy import HIERARCHY_MODES, HeadingHierarchyResolver
 from chapter_tree.tree import ChapterTreeConfig, build_chapter_tree_from_ir
 from chapter_tree.zero_shot_classifier import OpenAICompatibleHeadingClassifier
 from doc_parser.docx_native_ir import (
@@ -53,6 +54,8 @@ def build_docx_heading_dataset(
     *,
     classifier: Any,
     batch_size: int = 8,
+    hierarchy_mode: str = "streaming",
+    hierarchy_resolver: Any = None,
 ) -> dict[str, Any]:
     source_path = Path(source).resolve()
     output_root = Path(output).resolve()
@@ -69,8 +72,14 @@ def build_docx_heading_dataset(
         ir = native_docx_to_ir(path)
         examples = heading_examples_from_native_ir(ir)
         predictions = classifier.predict(examples, batch_size=batch_size)
+        resolver = hierarchy_resolver or HeadingHierarchyResolver(
+            classifier, mode=hierarchy_mode,
+        )
+        predictions = resolver.resolve(examples, predictions)
         tree, blocks = build_chapter_tree_from_ir(
-            ir.to_dict(), config=ChapterTreeConfig(heading_mode="hybrid"),
+            ir.to_dict(), config=ChapterTreeConfig(
+                heading_mode="hybrid", flat_headings=hierarchy_mode == "none",
+            ),
             predictions=predictions,
         )
         groups = chapter_groups_document(tree, blocks)
@@ -93,6 +102,13 @@ def build_docx_heading_dataset(
             "classified_paragraph_count": len(examples),
             "native_heading_count": sum(row.get("native_heading_count", 0) > 0 for row in predictions),
             "model_heading_count": style_stats["model_heading_count"],
+            "hierarchy_mode": hierarchy_mode,
+            "hierarchy_model_decision_count": sum(
+                row.get("hierarchy_source") in {
+                    "streaming_model", "streaming_context_model", "global_model",
+                } for row in predictions
+            ),
+            "tree_max_depth": tree["stats"]["max_depth"],
             "tree_section_count": tree["stats"]["section_count"],
             "flat_document": tree["stats"]["flat_document"],
             "warning_count": len(tree["warnings"]),
@@ -106,6 +122,7 @@ def build_docx_heading_dataset(
         "ocr_required": False,
         "source_files_modified": False,
         "model": getattr(classifier, "model", None),
+        "hierarchy_mode": hierarchy_mode,
         "documents": rows,
     }
     _write_json(output_root / "dataset-manifest.json", manifest)
@@ -119,6 +136,10 @@ def main() -> None:
     parser.add_argument("--base-url", help="OpenAI 兼容 /v1 地址；也可用 HEADING_MODEL_BASE_URL")
     parser.add_argument("--model", help="模型名；也可用 HEADING_MODEL_NAME")
     parser.add_argument("--batch-size", type=int, default=8, help="每次请求判别的段落数")
+    parser.add_argument(
+        "--hierarchy-mode", choices=HIERARCHY_MODES, default="streaming",
+        help="none=平铺 baseline；streaming=活动路径；streaming-context=路径加上下文；global=完整标题序列",
+    )
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--max-tokens", type=int, default=4096, help="包含思考内容在内的最大输出 token 数")
     parser.add_argument("--disable-thinking", action="store_true", help="Qwen 兼容服务显式关闭思考")
@@ -134,6 +155,7 @@ def main() -> None:
     )
     result = build_docx_heading_dataset(
         args.input, args.output, classifier=classifier, batch_size=args.batch_size,
+        hierarchy_mode=args.hierarchy_mode,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

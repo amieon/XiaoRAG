@@ -18,6 +18,7 @@ src/chapter_tree/
   heading_classifier.py   # heading/body 数据链、Transformer 微调与推理
   native_classifier.py    # 完全信任 DOCX 原生标题证据的无模型模式
   zero_shot_classifier.py # OpenAI 兼容零样本标题判别，原生标题优先且无需微调
+  heading_hierarchy.py    # none／streaming／streaming-context／global 父子关系恢复
   tree.py                 # 原生／上游标题与显式编号构建确定性章节树
   groups.py               # 章节树转两层父子分块可消费的 flat groups
 src/doc_chunking/
@@ -175,32 +176,48 @@ API 密钥只能放当前终端或权限受限的本地 `.env`，不得写入命
 
 ## 无 OCR 的 DOCX 标题数据集生成
 
-当原始 DOCX 没有 Heading 样式时，可以直接读取 OOXML 段落和表格，不运行 OCR／版面模型。通用模型只判断缺少原生证据的段落；已有 Heading 样式保持优先。程序随后生成章节树，并按原生段落下标把模型确认的标题回写为 `Heading 1..6`，不会按重复文本猜段落，也不会覆盖原文件。
+当原始 DOCX 没有 Heading 样式时，可以直接读取 OOXML 段落和表格，不运行 OCR／版面模型。通用模型只判断缺少原生证据的段落；已有 Heading 样式保持优先。标题识别与层级恢复是两个阶段：前者回答“是不是标题”，后者让模型选择 `parent_id`，程序统一计算 `heading_level=parent.level+1`，不再把局部批次猜测的绝对层级当成可靠全局结构。随后按原生段落下标回写 `Heading 1..6`，不会按重复文本猜段落，也不会覆盖原文件。
 
 ```powershell
 $env:HEADING_MODEL_BASE_URL = 'http://127.0.0.1:8000/v1'
 $env:HEADING_MODEL_NAME = '你的模型名'
 $env:HEADING_MODEL_API_KEY = '你的密钥'
-.venv\Scripts\python.exe scripts\build_docx_heading_dataset.py --input "datasets\raw-docx" --output "datasets\styled-exp01" --batch-size 8
+.venv\Scripts\python.exe scripts\build_docx_heading_dataset.py --input "datasets\raw-docx" --output "datasets\styled-exp01" --batch-size 8 --hierarchy-mode streaming
 ```
+
+`--hierarchy-mode` 支持四种可对照实验的模式，模型名、服务地址和规模始终由参数或环境变量决定，代码不绑定 7B 或任何固定模型：
+
+- `none`：不恢复父子关系，所有标题（包括原生 Heading 和明确编号标题）都平铺为一级，不调用层级模型，作为 baseline。
+- `streaming`：逐个处理无锚点标题，只发送当前标题和“根到上一标题”的活动路径；模型只能选择 `root` 或路径内节点，天然拒绝未来引用和环。
+- `streaming-context`：在活动路径之外增加当前标题前后文和最近最多三个已关闭标题，便于比较上下文是否值得额外输入。
+- `global`：一次发送完整有序标题短清单，模型只为无锚点标题选择任意前序标题作为父节点；程序严格检查缺块、重复、未知 ID 和未来父节点。
+
+原生 Heading／大纲级别与明确编号规则始终优先，不为这些标题调用第二次模型。每个标题的首个根节点由程序确定，不伪记为一次模型决策。各模式应分别使用新的输出目录，例如 `styled-none-exp01`、`styled-streaming-exp01`、`styled-context-exp01`、`styled-global-exp01`，不得混合两次实验产物。
 
 每次实验使用新的空输出目录。每个文档生成：
 
 ```text
 documents/<原文档名>/
   document.json              # 逐段／逐表 DocumentIR，保留 native_id 和段落下标
-  heading-predictions.jsonl  # 原生判定与零样本模型判定
+  heading-predictions.jsonl  # 标题判定、真实父块 ID、最终层级与各自来源
   chapter-tree.json          # 可直接查看的章节树、标题路径和判定来源
   chapter-groups.json        # 后续 parent/child 切块输入
   styled.docx                # 带 Heading 样式的新文件，可在 Word 导航窗格查看
 ```
 
-`dataset-manifest.json` 汇总每篇文档的原生／模型标题数、章节数、警告数和新 DOCX 路径。这里没有自动插入可见目录，避免目录文本与正文重复进入知识库；如果需要 Word 目录，可在 `styled.docx` 中通过“引用 → 目录”生成。真实模型质量仍需在独立人工复核集上评估，单元测试中的假响应只验证数据流、格式校验和回写正确性。
+`heading-predictions.jsonl` 中，`hierarchy_parent_id` 是真实父块 ID，`hierarchy_source` 区分 `native`、`explicit_numbering`、`document_root`、各模型模式和 `baseline_no_tree`。`dataset-manifest.json` 汇总 `hierarchy_mode`、实际层级模型决策数、树最大深度、章节数、原生／模型标题数、警告数和新 DOCX 路径。这里没有自动插入可见目录，避免目录文本与正文重复进入知识库；如果需要 Word 目录，可在 `styled.docx` 中通过“引用 → 目录”生成。真实模型质量仍需在独立人工复核集上评估，单元测试中的假响应只验证数据流、格式校验和回写正确性。
 
 继续生成两层父子块时，必须把同一份预测显式传给切块器：
 
 ```bat
 .venv\Scripts\python.exe scripts\build_chunks.py --input "datasets\styled-exp01\documents\demo\document.json" --predictions "datasets\styled-exp01\documents\demo\heading-predictions.jsonl" --mode hybrid --output "var\chunks-exp01"
+```
+
+重放 `none` 实验时，独立建树和切块都额外传入 `--flat-headings`，保证下游不会从原生样式重新恢复旧层级：
+
+```bat
+.venv\Scripts\python.exe scripts\build_chapter_tree.py --input "datasets\styled-none-exp01\documents\demo\document.json" --predictions "datasets\styled-none-exp01\documents\demo\heading-predictions.jsonl" --mode hybrid --flat-headings --output "var\tree-none-exp01"
+.venv\Scripts\python.exe scripts\build_chunks.py --input "datasets\styled-none-exp01\documents\demo\document.json" --predictions "datasets\styled-none-exp01\documents\demo\heading-predictions.jsonl" --mode hybrid --flat-headings --output "var\chunks-none-exp01"
 ```
 
 ## 确定性章节树与结构 groups
@@ -485,7 +502,7 @@ ZIP/TAR 使用 `archive_security.py` 中的单一公开入口 `iter_archive_docu
 
 ## 验证状态与当前边界
 
-- 当前全量回归为 139 项测试及 12 个子测试通过，覆盖知识单元、零样本标题输入输出校验、DOCX 原生段落映射与样式回写、章节树、CDC 与自然边界、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序、两路索引查询和版本发布／向量复用。
+- 当前全量回归为 147 项测试及 16 个子测试通过，覆盖四种层级模式、活动路径与上下文开关、原生／编号锚点优先、非法父节点拒绝、`none` 下游一致平铺、零样本标题输入输出校验、DOCX 原生段落映射与样式回写、知识单元、章节树、CDC 与自然边界、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序、两路索引查询和版本发布／向量复用。
 - CDC 冒烟样例将 80 个短句切成 14 个 child；只在开头编号增加一个字符后，第一个 child 改变，后续 13 个 child 正文完全不变。对应版本发布只编码 1 个新 child，其余 13 个 `vector_ref` 完全复用。该样例验证局部稳定性与数据流，不代表所有文档都只会改变一个块。
 - 已用显式小型向量完成索引构建、BM25 独立查询及版本发布 CLI 冒烟，并用真实 Milvus Lite 文件库完成 FLAT+COSINE 建库、加载和 Top-K 查询；这些结果只验证算法和存储数据流。真实 `sentence-transformers` 模型尚未在本次环境中完成加载、检索精度或批量性能验证。
 - 已用真实 TXT 输入完成 `run_parser.py --build-knowledge-units` 端到端样例，并完成 1 轮预热、2 轮正式计时的基准冒烟验证。

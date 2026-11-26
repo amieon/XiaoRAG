@@ -20,6 +20,10 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path, help="新的输出目录")
     parser.add_argument("--mode", choices=("native", "upstream", "hybrid"), default="hybrid")
     parser.add_argument("--predictions", type=Path, help="可选：hybrid 模式的标题分类 JSONL")
+    parser.add_argument(
+        "--flat-headings", action="store_true",
+        help="重放 hierarchy-mode=none：所有标题（含原生标题）平铺为一级",
+    )
     parser.add_argument("--no-numbered-promotion", action="store_true")
     args = parser.parse_args()
     if not args.input.is_file():
@@ -45,6 +49,7 @@ def main() -> None:
         config = ChapterTreeConfig(
             heading_mode=args.mode,
             promote_numbered_headings=not args.no_numbered_promotion,
+            flat_headings=args.flat_headings,
         )
         tree, blocks = build_chapter_tree_from_ir(ir, config=config, predictions=predictions)
         grouped = chapter_groups_document(tree, blocks)

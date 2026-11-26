@@ -31,7 +31,12 @@ def example(block_id: str, text: str, *, native: bool = False) -> HeadingExample
 
 
 def response_for(payload: dict) -> dict:
-    items = json.loads(payload["messages"][1]["content"])["blocks"]
+    user = json.loads(payload["messages"][1]["content"])
+    if "current" in user:
+        # 流式层级请求：测试替身总是挂到当前活动路径末尾。
+        parent_id = user["active_path"][-1]["heading_id"]
+        return {"choices": [{"message": {"content": json.dumps({"parent_id": parent_id})}}]}
+    items = user["blocks"]
     rows = []
     for item in items:
         heading = item["text"] in {"系统建设方案", "总体架构", "无编号标题"}
@@ -160,6 +165,7 @@ class ZeroShotHeadingTests(unittest.TestCase):
             self.assertEqual(manifest["documents"][0]["native_heading_count"], 1)
             self.assertEqual(manifest["documents"][0]["model_heading_count"], 2)
             self.assertEqual(manifest["documents"][0]["tree_section_count"], 3)
+            self.assertEqual(manifest["documents"][0]["hierarchy_model_decision_count"], 1)
 
             # 原文件不被修改，新文件才具有模型补齐的标题样式。
             original = Document(source)

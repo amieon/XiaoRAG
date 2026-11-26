@@ -21,6 +21,7 @@ class ChapterTreeConfig:
     heading_mode: str = "hybrid"  # native / upstream / hybrid
     promote_numbered_headings: bool = True
     max_promoted_heading_chars: int = 80
+    flat_headings: bool = False
 
     def __post_init__(self) -> None:
         if self.heading_mode not in {"native", "upstream", "hybrid"}:
@@ -76,7 +77,7 @@ def _metadata_level(block: dict[str, Any]) -> int | None:
     return None
 
 
-def _numbering_level(text: str) -> int | None:
+def numbering_level(text: str) -> int | None:
     """识别明确的章节编号；第 X 条和小数正文不在此提升为标题。"""
     stripped = text.strip()
     match = re.match(r"^第\s*[0-9一二三四五六七八九十百千万零〇两]+\s*([部篇章节])(?:\s|$)", stripped)
@@ -134,7 +135,7 @@ def _upstream_heading(
         if prediction.get("mode") == "transformer":
             return None
 
-    numbered_level = _numbering_level(_first_line(block.get("text", "")))
+    numbered_level = numbering_level(_first_line(block.get("text", "")))
     if block.get("kind") == "heading" or native_kind in {"title", "doc_title", "document_title", "paragraph_title", "section_heading"}:
         level = _metadata_level(block) or numbered_level
         if level is None:
@@ -183,6 +184,8 @@ def build_chapter_tree(
     for block in blocks:
         block_id = block["block_id"]
         heading = _upstream_heading(block, predictions=prediction_map, config=config, warnings=warnings)
+        if heading is not None and config.flat_headings:
+            heading = {**heading, "level": 1, "source": "baseline_no_tree"}
         if heading is None:
             parent = stack[-1] if stack else root
             parent.block_ids.append(block_id)
