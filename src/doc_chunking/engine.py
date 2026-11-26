@@ -261,7 +261,10 @@ def _chunk_record(document_id, chunk_id, level, parent_id, group, blocks, text, 
     }
 
 
-def chunk_document(ir, native=None, source_manifest=None, config=None, *, tree_config=None):
+def chunk_document(
+    ir, native=None, source_manifest=None, config=None, *, tree_config=None,
+    predictions=None,
+):
     config = deepcopy(config) if config is not None else load_config()
     validate_config(config)
     native = {} if native is None else native
@@ -291,6 +294,7 @@ def chunk_document(ir, native=None, source_manifest=None, config=None, *, tree_c
         tree = build_chapter_tree(
             prepared["blocks"], document_id=ir["document_id"],
             config=tree_config or ChapterTreeConfig(heading_mode="hybrid"),
+            predictions=predictions,
         )
         groups = chapter_tree_to_groups(tree, prepared["blocks"])
         rules = [{"rule": "chapter_tree", "matched": True}]

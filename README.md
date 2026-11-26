@@ -195,6 +195,12 @@ documents/<原文档名>/
 
 `dataset-manifest.json` 汇总每篇文档的原生／模型标题数、章节数、警告数和新 DOCX 路径。这里没有自动插入可见目录，避免目录文本与正文重复进入知识库；如果需要 Word 目录，可在 `styled.docx` 中通过“引用 → 目录”生成。真实模型质量仍需在独立人工复核集上评估，单元测试中的假响应只验证数据流、格式校验和回写正确性。
 
+继续生成两层父子块时，必须把同一份预测显式传给切块器：
+
+```bat
+.venv\Scripts\python.exe scripts\build_chunks.py --input "datasets\styled-exp01\documents\demo\document.json" --predictions "datasets\styled-exp01\documents\demo\heading-predictions.jsonl" --mode hybrid --output "var\chunks-exp01"
+```
+
 ## 确定性章节树与结构 groups
 
 章节树按 `page_no/reading_order` 的物理顺序构建，不用坐标二次排序，也不把树遍历顺序当成正文顺序。标题证据优先级为原生 DOCX 结构、可选 Transformer 预测、上游布局标题；普通段落中的显式“第一章／1.1”编号可保守补充层级。列表、表格、公式和带句末标点的编号正文不会被编号规则提升为标题。完全没有标题时保留根节点下平铺，层级跳跃只记录警告，不伪造缺失章节。

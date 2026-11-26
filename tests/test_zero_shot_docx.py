@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -140,6 +141,18 @@ class ZeroShotHeadingTests(unittest.TestCase):
             ])
             self.assertTrue((output / "documents/demo/chapter-tree.json").is_file())
             self.assertTrue((output / "documents/demo/heading-predictions.jsonl").is_file())
+
+            # 独立切块 CLI 必须消费同一份预测，不能退回只信原生标题。
+            chunks = root / "chunks-exp01"
+            subprocess.run([
+                sys.executable, str(ROOT / "scripts/build_chunks.py"),
+                "--input", str(output / "documents/demo/document.json"),
+                "--predictions", str(output / "documents/demo/heading-predictions.jsonl"),
+                "--mode", "hybrid", "--output", str(chunks),
+            ], check=True, capture_output=True, text=True)
+            chunk_tree = json.loads((chunks / "chapter-tree.json").read_text(encoding="utf-8"))
+            self.assertEqual(chunk_tree["stats"]["section_count"], 3)
+            self.assertTrue((chunks / "chunks.jsonl").is_file())
 
 
 if __name__ == "__main__":

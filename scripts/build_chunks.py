@@ -29,6 +29,7 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path, help="新的空输出目录")
     parser.add_argument("--config", type=Path, help="默认 src/doc_chunking/config.json")
     parser.add_argument("--mode", choices=("native", "upstream", "hybrid"), default="hybrid")
+    parser.add_argument("--predictions", type=Path, help="可选：zero-shot/transformer 标题预测 JSONL")
     parser.add_argument("--no-numbered-promotion", action="store_true")
     args = parser.parse_args()
     if not args.input.is_file() or args.input.suffix.lower() != ".json":
@@ -44,8 +45,18 @@ def main() -> None:
             heading_mode=args.mode,
             promote_numbered_headings=not args.no_numbered_promotion,
         )
+        predictions = None
+        if args.predictions:
+            if not args.predictions.is_file():
+                raise ValueError(f"标题预测文件不存在：{args.predictions}")
+            predictions = [
+                json.loads(line) for line in args.predictions.read_text(encoding="utf-8-sig").splitlines()
+                if line.strip()
+            ]
+        if args.mode != "hybrid" and predictions is not None:
+            raise ValueError("--predictions 只用于 --mode hybrid")
         result = chunk_document(
-            ir, native, manifest, config, tree_config=tree_config,
+            ir, native, manifest, config, tree_config=tree_config, predictions=predictions,
         )
         integrity = validate_result(result, ir, native)
     except (ValueError, KeyError, TypeError, AttributeError, IndexError, json.JSONDecodeError) as exc:
