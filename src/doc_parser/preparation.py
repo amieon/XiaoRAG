@@ -291,9 +291,8 @@ def _attach_docx_native_structure(native_blocks: list[dict], native: dict) -> li
             for item in native.get("structure", []) or [] if isinstance(item, dict)
         ]
     for item in source_items:
-        if not isinstance(item, dict) or not (
-            isinstance(item.get("native_structure"), dict) or isinstance(item.get("list_structure"), dict)
-        ):
+        # 普通正文也保留 native_id；否则模型新增标题后无法准确回写原段落。
+        if not isinstance(item, dict):
             continue
         text = " ".join(str(item.get("text") or "").split()).casefold()
         if not text:
@@ -310,6 +309,7 @@ def _attach_docx_native_structure(native_blocks: list[dict], native: dict) -> li
         candidates = candidates_by_text.get(key, [])
         if len(candidates) == 1:
             item = candidates[0]
+            block["native_id"] = item.get("native_id") or (item.get("native_structure") or {}).get("native_id")
             if isinstance(item.get("native_structure"), dict):
                 block["native_structure"] = item["native_structure"]
             if isinstance(item.get("list_structure"), dict):

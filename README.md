@@ -17,6 +17,7 @@ src/chapter_tree/
   context.py              # 构造前后 crop 原文窗口
   heading_classifier.py   # heading/body 数据链、Transformer 微调与推理
   native_classifier.py    # 完全信任 DOCX 原生标题证据的无模型模式
+  zero_shot_classifier.py # OpenAI 兼容零样本标题判别，原生标题优先且无需微调
   tree.py                 # 原生／上游标题与显式编号构建确定性章节树
   groups.py               # 章节树转两层父子分块可消费的 flat groups
 src/doc_chunking/
@@ -35,6 +36,7 @@ src/hybrid_retrieval/
 src/versioning/
   store.py                # 路径定文档、线性完整快照、内容寻址向量与增量复用
 src/doc_parser/
+  docx_native_ir.py         # DOCX 原生段落直读、块到段落下标映射与 Heading 样式回写
   preparation.py          # 格式识别、原生抽取、Office/PDF/图片页包
   docx_numbering.py       # OOXML 自动编号列表、层级与序号提取
   archive_security.py     # 压缩包安全边界、惰性 BFS 展开与来源链
@@ -53,6 +55,7 @@ scripts/
   benchmark_parser.py          # 预热、重复计时、源码快照与实验清单
   train_heading_classifier.py  # 按文档划分数据并微调标题二分类器
   classify_headings.py         # 离线预测 heading/body，不改写原始 IR
+  build_docx_heading_dataset.py # 无 OCR 的 DOCX 标题补充、章节树和新样式 DOCX 数据集
   build_chapter_tree.py        # DocumentIR 独立构建章节树和结构 groups
   build_chunks.py              # 生成 structural-chunk.v1 两层父子块并硬校验
   export_retrieval_units.py    # 统一双方切块输出，导出 M2 检索单元
@@ -118,9 +121,10 @@ models/PP-OCRv6_small_rec
 
 ## 标题／正文二分类
 
-标题／正文判定支持两种显式模式；分类器只输出判定，章节树由独立构建步骤恢复：
+标题／正文判定支持三种显式模式；分类器只输出判定，章节树由独立构建步骤恢复：
 
 - `native`（默认）：完全信任 DOCX 的显式 Heading／Title 样式和 OOXML 大纲级别，有原生标题证据则为 `heading`，否则为 `body`。不加载模型，`confidence/scores` 为 `null`，不伪造概率。
+- `zero-shot`：调用 OpenAI 兼容的通用指令模型，无需训练或微调；已有原生标题不发送给模型，模型只补充缺失证据。每次请求包含当前块、前后块和上游标签，严格要求逐块返回 `block_id/label/heading_level`，缺块、重复、未知 ID 或非法层级均明确失败。
 - `transformer`：加载微调后的预训练 Transformer。模型输入为“当前块＋前一块＋后一块”，当前块置首以避免被右侧截断；没有训练产物时会明确失败，不会用随机初始化分类头生成结果。
 
 DOCX 预处理会把原生标题证据保存到 `native/objects.json` 的 `structure`，再与 LibreOffice 渲染后的原生文本块对齐。只有规范化全文相同且匹配唯一时才传递证据；重复标题文本会标记 `ambiguous_exact_text`，不会任选一个。该证据随后进入 crop 的 `metadata.native_structures`。因此 native 模式是“信任已明确对齐的原生结构”，不是根据短文本或字体猜标题；未对齐的块按正文处理。
@@ -154,7 +158,42 @@ DOCX 自动编号列表另从 OOXML `numPr/numbering.xml` 提取，保存到 `li
 .venv\Scripts\python.exe scripts\classify_headings.py --input var\parsed --mode transformer --model var\heading-model-exp01 --output var\heading-predictions-exp01.jsonl
 ```
 
+无需微调的通用模型模式（PowerShell；地址按实际部署修改）：
+
+```powershell
+$env:HEADING_MODEL_BASE_URL = 'http://127.0.0.1:8000/v1'
+$env:HEADING_MODEL_NAME = '你的模型名'
+$env:HEADING_MODEL_API_KEY = '你的密钥'
+.venv\Scripts\python.exe scripts\classify_headings.py --input var\parsed --mode zero-shot --output var\heading-zero-shot-exp01.jsonl
+```
+
+API 密钥只能放当前终端或权限受限的本地 `.env`，不得写入命令行参数、脚本、清单或 Git。零样本结果中的 `confidence/scores` 仍为 `null`，不将模型自报数值当作校准概率。
+
 上游 `raw_label` 可以辅助预标注，但若直接把它当全部真值，模型最多学习复现上游判断；要纠正标题误判，仍需人工复核和独立测试文档。
+
+## 无 OCR 的 DOCX 标题数据集生成
+
+当原始 DOCX 没有 Heading 样式时，可以直接读取 OOXML 段落和表格，不运行 OCR／版面模型。通用模型只判断缺少原生证据的段落；已有 Heading 样式保持优先。程序随后生成章节树，并按原生段落下标把模型确认的标题回写为 `Heading 1..6`，不会按重复文本猜段落，也不会覆盖原文件。
+
+```powershell
+$env:HEADING_MODEL_BASE_URL = 'http://127.0.0.1:8000/v1'
+$env:HEADING_MODEL_NAME = '你的模型名'
+$env:HEADING_MODEL_API_KEY = '你的密钥'
+.venv\Scripts\python.exe scripts\build_docx_heading_dataset.py --input "datasets\raw-docx" --output "datasets\styled-exp01" --batch-size 8
+```
+
+每次实验使用新的空输出目录。每个文档生成：
+
+```text
+documents/<原文档名>/
+  document.json              # 逐段／逐表 DocumentIR，保留 native_id 和段落下标
+  heading-predictions.jsonl  # 原生判定与零样本模型判定
+  chapter-tree.json          # 可直接查看的章节树、标题路径和判定来源
+  chapter-groups.json        # 后续 parent/child 切块输入
+  styled.docx                # 带 Heading 样式的新文件，可在 Word 导航窗格查看
+```
+
+`dataset-manifest.json` 汇总每篇文档的原生／模型标题数、章节数、警告数和新 DOCX 路径。这里没有自动插入可见目录，避免目录文本与正文重复进入知识库；如果需要 Word 目录，可在 `styled.docx` 中通过“引用 → 目录”生成。真实模型质量仍需在独立人工复核集上评估，单元测试中的假响应只验证数据流、格式校验和回写正确性。
 
 ## 确定性章节树与结构 groups
 
@@ -438,7 +477,7 @@ ZIP/TAR 使用 `archive_security.py` 中的单一公开入口 `iter_archive_docu
 
 ## 验证状态与当前边界
 
-- 当前全量回归为 134 项测试及 12 个子测试通过，覆盖知识单元、章节树、CDC 与自然边界、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序、两路索引查询和版本发布／向量复用。
+- 当前全量回归为 137 项测试及 12 个子测试通过，覆盖知识单元、零样本标题输入输出校验、DOCX 原生段落映射与样式回写、章节树、CDC 与自然边界、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序、两路索引查询和版本发布／向量复用。
 - CDC 冒烟样例将 80 个短句切成 14 个 child；只在开头编号增加一个字符后，第一个 child 改变，后续 13 个 child 正文完全不变。对应版本发布只编码 1 个新 child，其余 13 个 `vector_ref` 完全复用。该样例验证局部稳定性与数据流，不代表所有文档都只会改变一个块。
 - 已用显式小型向量完成索引构建、BM25 独立查询及版本发布 CLI 冒烟，并用真实 Milvus Lite 文件库完成 FLAT+COSINE 建库、加载和 Top-K 查询；这些结果只验证算法和存储数据流。真实 `sentence-transformers` 模型尚未在本次环境中完成加载、检索精度或批量性能验证。
 - 已用真实 TXT 输入完成 `run_parser.py --build-knowledge-units` 端到端样例，并完成 1 轮预热、2 轮正式计时的基准冒烟验证。

@@ -491,6 +491,7 @@ class RegionPipeline:
                 "line_scores": result.get("line_scores"),
                 "line_boxes": _plain(result.get("line_boxes")),
                 "native_block_ids": region.metadata.get("native_block_ids", []),
+                "native_ids": region.metadata.get("native_ids", []),
                 "native_structures": _plain(region.metadata.get("native_structures", [])),
                 "list_structures": _plain(region.metadata.get("list_structures", [])),
                 "layout": _plain(region.metadata),

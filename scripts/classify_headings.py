@@ -2,13 +2,16 @@ r"""预测 heading/body，不覆盖原始 page_result 或 DocumentIR。
 
 原生模式（默认，无需训练）：
 python scripts/classify_headings.py --input var/parsed --mode native --output var/heading-native.jsonl
-模型模式：
+零样本通用模型模式（密钥只从 HEADING_MODEL_API_KEY 环境变量读取）：
+python scripts/classify_headings.py --input var/parsed --mode zero-shot --base-url http://127.0.0.1:8000/v1 --model Qwen --output var/heading-zero-shot.jsonl
+微调模型模式：
 python scripts/classify_headings.py --input var/parsed --mode transformer --model var/heading-model-exp01 --output var/heading-model.jsonl
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -21,15 +24,18 @@ from chapter_tree.heading_classifier import (
     TransformerHeadingClassifier, load_heading_examples,
 )
 from chapter_tree.native_classifier import NativeHeadingClassifier
+from chapter_tree.zero_shot_classifier import OpenAICompatibleHeadingClassifier
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Predict binary heading/body labels")
     parser.add_argument("--input", required=True, help="page_result.json or a directory containing them")
-    parser.add_argument("--mode", choices=("native", "transformer"), default="native")
-    parser.add_argument("--model", help="Required in transformer mode; unused in native mode")
+    parser.add_argument("--mode", choices=("native", "transformer", "zero-shot"), default="native")
+    parser.add_argument("--model", help="transformer 的模型目录，或 zero-shot 的模型名；也可用 HEADING_MODEL_NAME")
+    parser.add_argument("--base-url", help="zero-shot 的 OpenAI 兼容 /v1 地址；也可用 HEADING_MODEL_BASE_URL")
+    parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--output", required=True, help="New prediction JSONL path")
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--max-length", type=int)
     parser.add_argument("--device", default="auto")
     args = parser.parse_args()
@@ -40,6 +46,12 @@ def main() -> None:
     examples = load_heading_examples(args.input)
     if args.mode == "native":
         classifier = NativeHeadingClassifier()
+    elif args.mode == "zero-shot":
+        classifier = OpenAICompatibleHeadingClassifier(
+            base_url=args.base_url or os.environ.get("HEADING_MODEL_BASE_URL", ""),
+            model=args.model or os.environ.get("HEADING_MODEL_NAME", ""),
+            timeout=args.timeout,
+        )
     else:
         if not args.model:
             raise ValueError("--model is required in transformer mode")
