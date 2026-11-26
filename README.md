@@ -124,7 +124,7 @@ models/PP-OCRv6_small_rec
 标题／正文判定支持三种显式模式；分类器只输出判定，章节树由独立构建步骤恢复：
 
 - `native`（默认）：完全信任 DOCX 的显式 Heading／Title 样式和 OOXML 大纲级别，有原生标题证据则为 `heading`，否则为 `body`。不加载模型，`confidence/scores` 为 `null`，不伪造概率。
-- `zero-shot`：调用 OpenAI 兼容的通用指令模型，无需训练或微调；已有原生标题不发送给模型，模型只补充缺失证据。每次请求包含当前块、前后块和上游标签，严格要求逐块返回 `block_id/label/heading_level`，缺块、重复、未知 ID 或非法层级均明确失败。
+- `zero-shot`：调用 OpenAI 兼容的通用指令模型，无需训练或微调；已有原生标题不发送给模型，模型只补充缺失证据。每次请求包含当前块、前后块和上游标签，模型只接收 `b0/b1/...` 临时代号，程序校验完整覆盖后映射回真实块 ID，避免抄写长哈希出错。缺块、重复、未知 ID 或非法层级均明确失败。
 - `transformer`：加载微调后的预训练 Transformer。模型输入为“当前块＋前一块＋后一块”，当前块置首以避免被右侧截断；没有训练产物时会明确失败，不会用随机初始化分类头生成结果。
 
 DOCX 预处理会把原生标题证据保存到 `native/objects.json` 的 `structure`，再与 LibreOffice 渲染后的原生文本块对齐。只有规范化全文相同且匹配唯一时才传递证据；重复标题文本会标记 `ambiguous_exact_text`，不会任选一个。该证据随后进入 crop 的 `metadata.native_structures`。因此 native 模式是“信任已明确对齐的原生结构”，不是根据短文本或字体猜标题；未对齐的块按正文处理。

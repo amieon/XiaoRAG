@@ -61,8 +61,9 @@ class ZeroShotHeadingTests(unittest.TestCase):
         ])
         self.assertEqual(len(calls), 1)
         sent = json.loads(calls[0]["messages"][1]["content"])["blocks"]
-        self.assertEqual([item["block_id"] for item in sent], [
-            "doc_p0001_b0001", "doc_p0001_b0002",
+        self.assertEqual([item["block_id"] for item in sent], ["b0", "b1"])
+        self.assertEqual([row["block_id"] for row in rows], [
+            "doc_p0001_b0000", "doc_p0001_b0001", "doc_p0001_b0002",
         ])
         self.assertEqual(rows[0]["decision_source"], "docx_native_trust")
         self.assertEqual(rows[1]["heading_level"], 1)

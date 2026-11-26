@@ -150,16 +150,18 @@ class OpenAICompatibleHeadingClassifier:
         return result
 
     def _predict_batch(self, examples: Sequence[HeadingExample]) -> list[dict[str, Any]]:
+        # 不让 LLM 抄长哈希块 ID；短代号在进程内映射回真实 ID。
+        real_ids = [item.block_id for item in examples]
+        local_ids = [f"b{index}" for index in range(len(examples))]
         items = [{
-            "block_id": item.block_id,
+            "block_id": local_ids[index],
             "text": item.text,
             "previous": (item.context.get("previous") or {}).get("text"),
             "next": (item.context.get("next") or {}).get("text"),
             "raw_label": item.raw_label,
             "reading_order": item.reading_order,
-        } for item in examples]
-        expected = [item.block_id for item in examples]
-        expected_ids = set(expected)
+        } for index, item in enumerate(examples)]
+        expected_ids = set(local_ids)
         payload = {
             "model": self.model,
             "temperature": 0,
@@ -184,11 +186,14 @@ class OpenAICompatibleHeadingClassifier:
         ids = [row["block_id"] for row in validated]
         if len(ids) != len(set(ids)):
             raise ValueError("Model returned duplicate block_id values")
-        if set(ids) != expected_ids or len(ids) != len(expected):
+        if set(ids) != expected_ids or len(ids) != len(local_ids):
             missing = sorted(expected_ids - set(ids))
             raise ValueError(f"Model must return every input block exactly once; missing={missing[:3]}")
         by_id = {row["block_id"]: row for row in validated}
-        return [by_id[block_id] for block_id in expected]
+        return [
+            {**by_id[local_id], "block_id": real_id}
+            for local_id, real_id in zip(local_ids, real_ids)
+        ]
 
     def predict(
         self, examples: Sequence[HeadingExample], *, batch_size: int = 8,
