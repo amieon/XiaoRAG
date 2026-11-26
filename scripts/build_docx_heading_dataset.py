@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from chapter_tree.groups import chapter_groups_document
 from chapter_tree.heading_hierarchy import HIERARCHY_MODES, HeadingHierarchyResolver
+from chapter_tree.native_classifier import NativeHeadingClassifier
 from chapter_tree.tree import ChapterTreeConfig, build_chapter_tree_from_ir
 from chapter_tree.zero_shot_classifier import OpenAICompatibleHeadingClassifier
 from doc_parser.docx_native_ir import (
@@ -52,11 +53,17 @@ def build_docx_heading_dataset(
     source: str | Path,
     output: str | Path,
     *,
-    classifier: Any,
+    classifier: Any = None,
     batch_size: int = 8,
     hierarchy_mode: str = "streaming",
     hierarchy_resolver: Any = None,
+    native_only: bool = False,
 ) -> dict[str, Any]:
+    if not native_only and classifier is None:
+        raise ValueError("Hybrid DOCX dataset generation requires a classifier")
+    if native_only and hierarchy_resolver is not None:
+        raise ValueError("native_only does not accept a hierarchy resolver")
+    effective_hierarchy_mode = "native" if native_only else hierarchy_mode
     source_path = Path(source).resolve()
     output_root = Path(output).resolve()
     if output_root.exists() and any(output_root.iterdir()):
@@ -71,14 +78,20 @@ def build_docx_heading_dataset(
         document_output = output_root / "documents" / stem_path
         ir = native_docx_to_ir(path)
         examples = heading_examples_from_native_ir(ir)
-        predictions = classifier.predict(examples, batch_size=batch_size)
-        resolver = hierarchy_resolver or HeadingHierarchyResolver(
-            classifier, mode=hierarchy_mode,
-        )
-        predictions = resolver.resolve(examples, predictions)
+        if native_only:
+            # 纯原生 baseline：无模型、无编号补标题；resolver 只给原生标题写审计字段。
+            predictions = NativeHeadingClassifier().predict(examples, batch_size=batch_size)
+            predictions = HeadingHierarchyResolver(None, mode="streaming").resolve(examples, predictions)
+        else:
+            predictions = classifier.predict(examples, batch_size=batch_size)
+            resolver = hierarchy_resolver or HeadingHierarchyResolver(
+                classifier, mode=hierarchy_mode,
+            )
+            predictions = resolver.resolve(examples, predictions)
         tree, blocks = build_chapter_tree_from_ir(
             ir.to_dict(), config=ChapterTreeConfig(
-                heading_mode="hybrid", flat_headings=hierarchy_mode == "none",
+                heading_mode="native" if native_only else "hybrid",
+                flat_headings=not native_only and hierarchy_mode == "none",
             ),
             predictions=predictions,
         )
@@ -102,7 +115,8 @@ def build_docx_heading_dataset(
             "classified_paragraph_count": len(examples),
             "native_heading_count": sum(row.get("native_heading_count", 0) > 0 for row in predictions),
             "model_heading_count": style_stats["model_heading_count"],
-            "hierarchy_mode": hierarchy_mode,
+            "heading_mode": "native" if native_only else "hybrid",
+            "hierarchy_mode": effective_hierarchy_mode,
             "hierarchy_model_decision_count": sum(
                 row.get("hierarchy_source") in {
                     "streaming_model", "streaming_context_model", "global_model",
@@ -122,7 +136,8 @@ def build_docx_heading_dataset(
         "ocr_required": False,
         "source_files_modified": False,
         "model": getattr(classifier, "model", None),
-        "hierarchy_mode": hierarchy_mode,
+        "heading_mode": "native" if native_only else "hybrid",
+        "hierarchy_mode": effective_hierarchy_mode,
         "documents": rows,
     }
     _write_json(output_root / "dataset-manifest.json", manifest)
@@ -133,6 +148,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--native-only", action="store_true",
+        help="纯原生 baseline：只信 Heading／OOXML 大纲，不调用模型，也不用编号补标题",
+    )
     parser.add_argument("--base-url", help="OpenAI 兼容 /v1 地址；也可用 HEADING_MODEL_BASE_URL")
     parser.add_argument("--model", help="模型名；也可用 HEADING_MODEL_NAME")
     parser.add_argument("--batch-size", type=int, default=8, help="每次请求判别的段落数")
@@ -145,7 +164,7 @@ def main() -> None:
     parser.add_argument("--disable-thinking", action="store_true", help="Qwen 兼容服务显式关闭思考")
     parser.add_argument("--without-response-format", action="store_true", help="服务不支持 response_format 时关闭 JSON 模式")
     args = parser.parse_args()
-    classifier = OpenAICompatibleHeadingClassifier(
+    classifier = None if args.native_only else OpenAICompatibleHeadingClassifier(
         base_url=args.base_url or os.environ.get("HEADING_MODEL_BASE_URL", ""),
         model=args.model or os.environ.get("HEADING_MODEL_NAME", ""),
         timeout=args.timeout,
@@ -155,7 +174,7 @@ def main() -> None:
     )
     result = build_docx_heading_dataset(
         args.input, args.output, classifier=classifier, batch_size=args.batch_size,
-        hierarchy_mode=args.hierarchy_mode,
+        hierarchy_mode=args.hierarchy_mode, native_only=args.native_only,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

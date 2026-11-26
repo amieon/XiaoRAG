@@ -194,6 +194,16 @@ $env:HEADING_MODEL_API_KEY = '你的密钥'
 
 原生 Heading／大纲级别与明确编号规则始终优先，不为这些标题调用第二次模型。每个标题的首个根节点由程序确定，不伪记为一次模型决策。各模式应分别使用新的输出目录，例如 `styled-none-exp01`、`styled-streaming-exp01`、`styled-context-exp01`、`styled-global-exp01`，不得混合两次实验产物。
 
+这里的“原生结构”是 Heading／Title 样式及 OOXML `outlineLvl`，不是页面上可见的自动目录文本。可见目录可能过期或手工改错，而且重复进入正文会污染知识库，因此不作为最高优先级结构来源。
+
+另提供完全无模型的纯原生 baseline：
+
+```bat
+.venv\Scripts\python.exe scripts\build_docx_heading_dataset.py --input "datasets\raw-docx" --output "datasets\native-only-exp01" --native-only
+```
+
+`--native-only` 不需要模型地址、模型名或密钥，只把显式原生标题纳入章节树并保留其原生层级；普通段落即使写成“第一章／1.1”也不会被提升为标题。它与 `none` 的区别是：`native-only` 检验“原生结构本身能恢复多少”，`none` 检验“所有标题完全平铺时会怎样”。纯原生结果在 manifest 中记录 `heading_mode=native`、`hierarchy_mode=native`、`model=null`。
+
 每次实验使用新的空输出目录。每个文档生成：
 
 ```text
@@ -502,7 +512,7 @@ ZIP/TAR 使用 `archive_security.py` 中的单一公开入口 `iter_archive_docu
 
 ## 验证状态与当前边界
 
-- 当前全量回归为 147 项测试及 16 个子测试通过，覆盖四种层级模式、活动路径与上下文开关、原生／编号锚点优先、非法父节点拒绝、`none` 下游一致平铺、零样本标题输入输出校验、DOCX 原生段落映射与样式回写、知识单元、章节树、CDC 与自然边界、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序、两路索引查询和版本发布／向量复用。
+- 当前全量回归为 148 项测试及 16 个子测试通过，覆盖四种层级模式、无模型纯原生 baseline、活动路径与上下文开关、原生／编号锚点优先、非法父节点拒绝、`none` 下游一致平铺、零样本标题输入输出校验、DOCX 原生段落映射与样式回写、知识单元、章节树、CDC 与自然边界、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序、两路索引查询和版本发布／向量复用。
 - CDC 冒烟样例将 80 个短句切成 14 个 child；只在开头编号增加一个字符后，第一个 child 改变，后续 13 个 child 正文完全不变。对应版本发布只编码 1 个新 child，其余 13 个 `vector_ref` 完全复用。该样例验证局部稳定性与数据流，不代表所有文档都只会改变一个块。
 - 已用显式小型向量完成索引构建、BM25 独立查询及版本发布 CLI 冒烟，并用真实 Milvus Lite 文件库完成 FLAT+COSINE 建库、加载和 Top-K 查询；这些结果只验证算法和存储数据流。真实 `sentence-transformers` 模型尚未在本次环境中完成加载、检索精度或批量性能验证。
 - 已用真实 TXT 输入完成 `run_parser.py --build-knowledge-units` 端到端样例，并完成 1 轮预热、2 轮正式计时的基准冒烟验证。

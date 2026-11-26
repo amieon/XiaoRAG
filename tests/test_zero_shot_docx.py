@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -202,6 +203,53 @@ class ZeroShotHeadingTests(unittest.TestCase):
             chunk_tree = json.loads((chunks / "chapter-tree.json").read_text(encoding="utf-8"))
             self.assertEqual(chunk_tree["stats"]["section_count"], 3)
             self.assertTrue((chunks / "chunks.jsonl").is_file())
+
+    def test_native_only_cli_needs_no_model_and_ignores_numbered_plain_text(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "native.docx"
+            document = Document()
+            document.add_paragraph("原生总论", style="Heading 1")
+            document.add_paragraph("原生子节", style="Heading 2")
+            document.add_paragraph("1.1 普通编号文本")
+            document.add_paragraph("无样式标题")
+            document.add_paragraph("正文。")
+            document.save(source)
+
+            output = root / "native-only-exp01"
+            environment = dict(os.environ)
+            environment.pop("HEADING_MODEL_BASE_URL", None)
+            environment.pop("HEADING_MODEL_NAME", None)
+            environment.pop("HEADING_MODEL_API_KEY", None)
+            subprocess.run([
+                sys.executable, str(ROOT / "scripts/build_docx_heading_dataset.py"),
+                "--input", str(source), "--output", str(output), "--native-only",
+            ], check=True, capture_output=True, text=True, env=environment)
+
+            manifest = json.loads((output / "dataset-manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["heading_mode"], "native")
+            self.assertEqual(manifest["hierarchy_mode"], "native")
+            self.assertIsNone(manifest["model"])
+            self.assertEqual(manifest["documents"][0]["native_heading_count"], 2)
+            self.assertEqual(manifest["documents"][0]["model_heading_count"], 0)
+            self.assertEqual(manifest["documents"][0]["hierarchy_model_decision_count"], 0)
+            self.assertEqual(manifest["documents"][0]["tree_section_count"], 2)
+
+            tree = json.loads((output / "documents/native/chapter-tree.json").read_text(encoding="utf-8"))
+            self.assertEqual([node["title"] for node in tree["nodes"][1:]], ["原生总论", "原生子节"])
+            self.assertEqual([node["level"] for node in tree["nodes"][1:]], [1, 2])
+            predictions = [
+                json.loads(line) for line in
+                (output / "documents/native/heading-predictions.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual([row["label"] for row in predictions], [
+                "heading", "heading", "body", "body", "body",
+            ])
+            styled = Document(output / manifest["documents"][0]["styled_docx"])
+            self.assertEqual(styled.paragraphs[0].style.name, "Heading 1")
+            self.assertEqual(styled.paragraphs[1].style.name, "Heading 2")
+            self.assertEqual(styled.paragraphs[2].style.name, "Normal")
+            self.assertEqual(styled.paragraphs[3].style.name, "Normal")
 
 
 if __name__ == "__main__":
