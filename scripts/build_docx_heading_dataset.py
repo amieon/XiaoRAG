@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+r"""DOCX 原生直读 → 零样本标题补充 → 章节树 → 带 Heading 样式的新 DOCX。
+
+全程不运行 OCR，不覆盖原文件，输出目录必须为空。
+PowerShell 示例：
+  $env:HEADING_MODEL_API_KEY = '你的密钥'
+  .venv\Scripts\python.exe scripts\build_docx_heading_dataset.py --input datasets\raw-docx --output datasets\styled-exp01 --base-url http://127.0.0.1:8000/v1 --model Qwen
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import sys
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from chapter_tree.groups import chapter_groups_document
+from chapter_tree.tree import ChapterTreeConfig, build_chapter_tree_from_ir
+from chapter_tree.zero_shot_classifier import OpenAICompatibleHeadingClassifier
+from doc_parser.docx_native_ir import (
+    heading_examples_from_native_ir, native_docx_to_ir, write_styled_docx,
+)
+
+
+def _write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _sources(source: Path) -> list[Path]:
+    if source.is_file():
+        if source.suffix.casefold() != ".docx":
+            raise ValueError("Input file must be DOCX")
+        return [source]
+    if not source.is_dir():
+        raise FileNotFoundError(source)
+    files = sorted(
+        path for path in source.rglob("*.docx")
+        if path.is_file() and not path.name.startswith("~$") and not path.is_symlink()
+    )
+    if not files:
+        raise ValueError(f"Input folder contains no DOCX files: {source}")
+    return files
+
+
+def build_docx_heading_dataset(
+    source: str | Path,
+    output: str | Path,
+    *,
+    classifier: Any,
+    batch_size: int = 8,
+) -> dict[str, Any]:
+    source_path = Path(source).resolve()
+    output_root = Path(output).resolve()
+    if output_root.exists() and any(output_root.iterdir()):
+        raise ValueError("Dataset output directory must be empty; use a new experiment directory")
+    if source_path.is_dir() and output_root.is_relative_to(source_path):
+        raise ValueError("Dataset output must not be inside the input folder")
+    output_root.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for path in _sources(source_path):
+        relative = path.name if source_path.is_file() else path.relative_to(source_path).as_posix()
+        stem_path = Path(relative).with_suffix("")
+        document_output = output_root / "documents" / stem_path
+        ir = native_docx_to_ir(path)
+        examples = heading_examples_from_native_ir(ir)
+        predictions = classifier.predict(examples, batch_size=batch_size)
+        tree, blocks = build_chapter_tree_from_ir(
+            ir.to_dict(), config=ChapterTreeConfig(heading_mode="hybrid"),
+            predictions=predictions,
+        )
+        groups = chapter_groups_document(tree, blocks)
+        styled_path = document_output / "styled.docx"
+        style_stats = write_styled_docx(path, styled_path, ir, predictions)
+
+        document_output.mkdir(parents=True, exist_ok=True)
+        ir.to_json(document_output / "document.json")
+        _write_json(document_output / "chapter-tree.json", tree)
+        _write_json(document_output / "chapter-groups.json", groups)
+        with (document_output / "heading-predictions.jsonl").open("x", encoding="utf-8") as stream:
+            for prediction in predictions:
+                stream.write(json.dumps(prediction, ensure_ascii=False) + "\n")
+        rows.append({
+            "source": relative,
+            "document_id": ir.document_id,
+            "output": document_output.relative_to(output_root).as_posix(),
+            "styled_docx": styled_path.relative_to(output_root).as_posix(),
+            "native_block_count": sum(len(page.blocks) for page in ir.pages),
+            "classified_paragraph_count": len(examples),
+            "native_heading_count": sum(row.get("native_heading_count", 0) > 0 for row in predictions),
+            "model_heading_count": style_stats["model_heading_count"],
+            "tree_section_count": tree["stats"]["section_count"],
+            "flat_document": tree["stats"]["flat_document"],
+            "warning_count": len(tree["warnings"]),
+            **style_stats,
+        })
+    manifest = {
+        "schema_version": "docx-heading-dataset.v1",
+        "status": "success",
+        "source": str(source_path),
+        "document_count": len(rows),
+        "ocr_required": False,
+        "source_files_modified": False,
+        "model": getattr(classifier, "model", None),
+        "documents": rows,
+    }
+    _write_json(output_root / "dataset-manifest.json", manifest)
+    return manifest
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input", required=True, type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--base-url", help="OpenAI 兼容 /v1 地址；也可用 HEADING_MODEL_BASE_URL")
+    parser.add_argument("--model", help="模型名；也可用 HEADING_MODEL_NAME")
+    parser.add_argument("--batch-size", type=int, default=8, help="每次请求判别的段落数")
+    parser.add_argument("--timeout", type=float, default=120.0)
+    args = parser.parse_args()
+    classifier = OpenAICompatibleHeadingClassifier(
+        base_url=args.base_url or os.environ.get("HEADING_MODEL_BASE_URL", ""),
+        model=args.model or os.environ.get("HEADING_MODEL_NAME", ""),
+        timeout=args.timeout,
+    )
+    result = build_docx_heading_dataset(
+        args.input, args.output, classifier=classifier, batch_size=args.batch_size,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()
