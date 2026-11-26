@@ -34,6 +34,9 @@ def main() -> None:
     parser.add_argument("--model", help="transformer 的模型目录，或 zero-shot 的模型名；也可用 HEADING_MODEL_NAME")
     parser.add_argument("--base-url", help="zero-shot 的 OpenAI 兼容 /v1 地址；也可用 HEADING_MODEL_BASE_URL")
     parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--disable-thinking", action="store_true")
+    parser.add_argument("--without-response-format", action="store_true")
     parser.add_argument("--output", required=True, help="New prediction JSONL path")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--max-length", type=int)
@@ -51,6 +54,9 @@ def main() -> None:
             base_url=args.base_url or os.environ.get("HEADING_MODEL_BASE_URL", ""),
             model=args.model or os.environ.get("HEADING_MODEL_NAME", ""),
             timeout=args.timeout,
+            max_tokens=args.max_tokens,
+            disable_thinking=args.disable_thinking,
+            use_response_format=not args.without_response_format,
         )
     else:
         if not args.model:

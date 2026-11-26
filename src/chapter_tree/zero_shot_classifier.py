@@ -34,16 +34,33 @@ def _endpoint(base_url: str) -> str:
 
 def _content(payload: dict[str, Any]) -> str:
     try:
-        content = payload["choices"][0]["message"]["content"]
+        choice = payload["choices"][0]
+        message = choice["message"]
+        content = message["content"]
     except (KeyError, IndexError, TypeError) as exc:
         raise ValueError("Model response has no choices[0].message.content") from exc
     if isinstance(content, list):
         content = "".join(
             str(item.get("text") or "") for item in content
-            if isinstance(item, dict) and item.get("type") in {None, "text"}
+            if isinstance(item, dict) and item.get("type") in {None, "text", "output_text"}
         )
     if not isinstance(content, str) or not content.strip():
-        raise ValueError("Model response content is empty")
+        reasoning = message.get("reasoning_content")
+        reasoning_chars = len(reasoning) if isinstance(reasoning, str) else 0
+        usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        completion_tokens = usage.get("completion_tokens", "unknown")
+        finish_reason = choice.get("finish_reason")
+        detail = (
+            "Model response content is empty: "
+            f"finish_reason={finish_reason!r}, reasoning_chars={reasoning_chars}, "
+            f"completion_tokens={completion_tokens}, message_keys={sorted(message)}"
+        )
+        if reasoning_chars or finish_reason == "length":
+            detail += (
+                "; the service returned reasoning without a final answer. "
+                "Increase --max-tokens or use --disable-thinking on a compatible Qwen service"
+            )
+        raise ValueError(detail)
     return content.strip()
 
 
@@ -90,16 +107,24 @@ class OpenAICompatibleHeadingClassifier:
         model: str,
         api_key: str | None = None,
         timeout: float = 120.0,
+        max_tokens: int = 4096,
+        use_response_format: bool = True,
+        disable_thinking: bool = False,
         transport: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ) -> None:
         if not model.strip():
             raise ValueError("zero-shot mode requires --model or HEADING_MODEL_NAME")
         if timeout <= 0:
             raise ValueError("timeout must be positive")
+        if max_tokens < 256:
+            raise ValueError("max_tokens must be at least 256")
         self.url = _endpoint(base_url)
         self.model = model.strip()
         self.api_key = api_key if api_key is not None else os.environ.get("HEADING_MODEL_API_KEY")
         self.timeout = timeout
+        self.max_tokens = max_tokens
+        self.use_response_format = use_response_format
+        self.disable_thinking = disable_thinking
         self.transport = transport
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -138,12 +163,18 @@ class OpenAICompatibleHeadingClassifier:
         payload = {
             "model": self.model,
             "temperature": 0,
+            "max_tokens": self.max_tokens,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": json.dumps({"blocks": items}, ensure_ascii=False)},
             ],
-            "response_format": {"type": "json_object"},
         }
+        if self.use_response_format:
+            payload["response_format"] = {"type": "json_object"}
+        if self.disable_thinking:
+            # Qwen 兼容服务常见两种开关；只有用户显式要求时才发送这些扩展字段。
+            payload["enable_thinking"] = False
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         response = self._post(payload)
         decoded = _json_content(_content(response))
         rows = decoded.get("predictions") if isinstance(decoded, dict) else decoded

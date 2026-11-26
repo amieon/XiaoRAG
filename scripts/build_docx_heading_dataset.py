@@ -120,11 +120,17 @@ def main() -> None:
     parser.add_argument("--model", help="模型名；也可用 HEADING_MODEL_NAME")
     parser.add_argument("--batch-size", type=int, default=8, help="每次请求判别的段落数")
     parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument("--max-tokens", type=int, default=4096, help="包含思考内容在内的最大输出 token 数")
+    parser.add_argument("--disable-thinking", action="store_true", help="Qwen 兼容服务显式关闭思考")
+    parser.add_argument("--without-response-format", action="store_true", help="服务不支持 response_format 时关闭 JSON 模式")
     args = parser.parse_args()
     classifier = OpenAICompatibleHeadingClassifier(
         base_url=args.base_url or os.environ.get("HEADING_MODEL_BASE_URL", ""),
         model=args.model or os.environ.get("HEADING_MODEL_NAME", ""),
         timeout=args.timeout,
+        max_tokens=args.max_tokens,
+        disable_thinking=args.disable_thinking,
+        use_response_format=not args.without_response_format,
     )
     result = build_docx_heading_dataset(
         args.input, args.output, classifier=classifier, batch_size=args.batch_size,
