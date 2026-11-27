@@ -102,18 +102,19 @@ class HeadingHierarchyTests(unittest.TestCase):
             "平台方案", "总体设计", "详细设计", "接口设计",
         ])]
         calls = []
-        parents = {"h001": "h000", "h002": "h000", "h003": "h002"}
+        parents = {"总体设计": "h000", "详细设计": "h000", "接口设计": "h002"}
 
         def transport(payload):
             user = json.loads(payload["messages"][1]["content"])
             calls.append(user)
-            return json_response({"parent_id": parents[user["current"]["heading_id"]]})
+            return json_response({"parent_id": parents[user["current"]["text"]]})
 
         resolved = HeadingHierarchyResolver(client_for(transport), mode="streaming").resolve(
             items, [prediction(item, level=6) for item in items],
         )
         self.assertEqual(len(calls), 3)
         self.assertTrue(all(set(call) == {"current", "active_path"} for call in calls))
+        self.assertTrue(all(set(call["current"]) == {"text"} for call in calls))
         self.assertEqual([node["heading_id"] for node in calls[1]["active_path"]], ["root", "h000", "h001"])
         # h002 与 h001 同级并挂到 h000，因此 h001 已关闭，不在下一次活动路径中。
         self.assertEqual([node["heading_id"] for node in calls[2]["active_path"]], ["root", "h000", "h002"])
@@ -122,17 +123,32 @@ class HeadingHierarchyTests(unittest.TestCase):
             None, items[0].block_id, items[0].block_id, items[2].block_id,
         ])
 
+    def test_streaming_never_exposes_current_local_id_as_a_parent_candidate(self):
+        items = [example(0, "总论"), example(1, "承诺人：")]
+        calls = []
+
+        def transport(payload):
+            calls.append(payload)
+            return json_response({"parent_id": "h000"})
+
+        resolved = HeadingHierarchyResolver(client_for(transport), mode="streaming").resolve(
+            items, [prediction(item) for item in items],
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("h001", json.dumps(calls[0]["messages"], ensure_ascii=False))
+        self.assertEqual(resolved[1]["hierarchy_parent_id"], items[0].block_id)
+
     def test_streaming_context_adds_local_text_and_recent_closed_headings(self):
         items = [example(index, text) for index, text in enumerate([
             "平台方案", "总体设计", "详细设计", "接口设计",
         ])]
         calls = []
-        parents = {"h001": "h000", "h002": "h000", "h003": "h002"}
+        parents = {"总体设计": "h000", "详细设计": "h000", "接口设计": "h002"}
 
         def transport(payload):
             user = json.loads(payload["messages"][1]["content"])
             calls.append(user)
-            return json_response({"parent_id": parents[user["current"]["heading_id"]]})
+            return json_response({"parent_id": parents[user["current"]["text"]]})
 
         HeadingHierarchyResolver(client_for(transport), mode="streaming-context").resolve(
             items, [prediction(item) for item in items],
@@ -157,12 +173,12 @@ class HeadingHierarchyTests(unittest.TestCase):
             prediction(items[2]), prediction(items[3]),
         ]
         calls = []
-        parents = {"h001": "h000", "h003": "h002"}
+        parents = {"模型子节": "h000", "模型新子节": "h002"}
 
         def transport(payload):
             user = json.loads(payload["messages"][1]["content"])
             calls.append(user)
-            return json_response({"parent_id": parents[user["current"]["heading_id"]]})
+            return json_response({"parent_id": parents[user["current"]["text"]]})
 
         resolved = HeadingHierarchyResolver(client_for(transport), mode="streaming").resolve(items, rows)
         self.assertEqual(len(calls), 2)
@@ -234,7 +250,7 @@ class HeadingHierarchyTests(unittest.TestCase):
         self.assertNotIn("h003", calls[0]["messages"][0]["content"])
         correction = json.loads(calls[1]["messages"][-1]["content"])
         self.assertEqual(correction["allowed_ids"], ["root", "h000"])
-        self.assertEqual(correction["current_heading_id"], "h001")
+        self.assertNotIn("current_heading_id", correction)
         self.assertNotIn("output", correction)
         self.assertEqual(resolved[1]["hierarchy_parent_id"], items[0].block_id)
 

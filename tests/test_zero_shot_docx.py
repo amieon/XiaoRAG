@@ -179,6 +179,32 @@ class ZeroShotHeadingTests(unittest.TestCase):
         self.assertIsNone(row["heading_level"])
         self.assertEqual(row["raw_model_heading_level"], 6)
 
+    def test_identical_duplicate_predictions_collapse_but_conflicts_fail(self):
+        duplicate_rows = [
+            {"block_id": "b0", "label": "body", "body": "选项一"},
+            {"block_id": "b0", "label": "body", "body": "选项二"},
+            {"block_id": "b0", "label": "body", "body": "选项三"},
+        ]
+        classifier = OpenAICompatibleHeadingClassifier(
+            base_url="http://localhost/v1", model="fake",
+            transport=lambda payload: {"choices": [{"message": {"content": json.dumps({
+                "predictions": duplicate_rows,
+            }, ensure_ascii=False)}}]},
+        )
+        row = classifier.predict([example("doc_p0001_b0000", "多个选项")])[0]
+        self.assertEqual(row["label"], "body")
+        self.assertEqual(row["duplicate_consensus"], "identical_predictions_collapsed")
+
+        classifier.max_retries = 0
+        classifier.transport = lambda payload: {"choices": [{"message": {"content": json.dumps({
+            "predictions": [
+                {"block_id": "b0", "label": "body", "heading_level": None},
+                {"block_id": "b0", "label": "heading", "heading_level": 1},
+            ],
+        })}}]}
+        with self.assertRaisesRegex(ValueError, "conflicting duplicate"):
+            classifier.predict([example("doc_p0001_b0000", "冲突判断")])
+
     def test_incomplete_batch_automatically_splits_without_dropping_blocks(self):
         calls = []
 

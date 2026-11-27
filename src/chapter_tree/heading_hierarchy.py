@@ -132,7 +132,8 @@ parent_id只能是当前标题之前的heading_id，顶级标题为null。不得
             {"heading_id": node.local_id, "text": node.text} for node in stack
         ]
         user: dict[str, Any] = {
-            "current": {"heading_id": local_id, "text": example.text},
+            # 当前标题编号只留在程序内；模型能看到它就可能照抄成自己的父节点。
+            "current": {"text": example.text},
             "active_path": candidates,
         }
         if self.mode == "streaming-context":
@@ -182,7 +183,6 @@ parent_id必须逐字复制active_path中某项的heading_id，不得创造节�
                         "重新回答同一个current标题。parent_id只能逐字复制allowed_ids之一；"
                         "不得把本提示中的说明文字当作parent_id。"
                     ),
-                    "current_heading_id": local_id,
                     "allowed_ids": allowed,
                 }, ensure_ascii=False)
                 messages = messages + [

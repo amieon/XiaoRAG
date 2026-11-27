@@ -258,9 +258,32 @@ class OpenAICompatibleHeadingClassifier:
                         f"block_ids={sorted(expected_ids)}",
                         file=sys.stderr, flush=True,
                     )
+                deduplicated = []
+                seen_predictions: dict[str, str] = {}
+                collapsed_duplicate_ids = set()
+                for row in validated:
+                    block_id = row["block_id"]
+                    signature = json.dumps(row, ensure_ascii=False, sort_keys=True)
+                    if block_id in seen_predictions:
+                        if seen_predictions[block_id] != signature:
+                            raise ValueError(
+                                f"Model returned conflicting duplicate predictions for {block_id}"
+                            )
+                        collapsed_duplicate_ids.add(block_id)
+                        continue
+                    seen_predictions[block_id] = signature
+                    deduplicated.append(row)
+                validated = deduplicated
+                if collapsed_duplicate_ids:
+                    for row in validated:
+                        if row["block_id"] in collapsed_duplicate_ids:
+                            row["duplicate_consensus"] = "identical_predictions_collapsed"
+                    print(
+                        f"[heading] collapsed identical duplicate predictions: "
+                        f"block_ids={sorted(collapsed_duplicate_ids)}",
+                        file=sys.stderr, flush=True,
+                    )
                 ids = [row["block_id"] for row in validated]
-                if len(ids) != len(set(ids)):
-                    raise ValueError("Model returned duplicate block_id values")
                 if set(ids) != expected_ids or len(ids) != len(local_ids):
                     missing = sorted(expected_ids - set(ids))
                     raise ValueError(
