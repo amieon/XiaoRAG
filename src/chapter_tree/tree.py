@@ -166,6 +166,11 @@ def build_chapter_tree(
         raise ValueError("chapter_tree_requires_unique_block_ids")
     prediction_map = {}
     for item in predictions or []:
+        # 批量预测文件可包含多份文档；只消费当前 IR 的行，其余文档不是“未知块”。
+        # 缺少 document_id 的旧文件仍按原逻辑严格校验，避免把错误预测静默混入。
+        prediction_document_id = item.get("document_id")
+        if isinstance(prediction_document_id, str) and prediction_document_id != document_id:
+            continue
         block_id = item.get("block_id")
         if not isinstance(block_id, str) or not block_id:
             raise ValueError("heading_prediction_requires_block_id")

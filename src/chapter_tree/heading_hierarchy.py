@@ -234,3 +234,31 @@ active_path按根到上一标题排列。若当前标题与路径末尾同级，
             row["hierarchy_source"] = source
             row["hierarchy_mode"] = self.mode
         return rows
+
+
+def predict_document_structure(
+    examples: Sequence[HeadingExample],
+    classifier: Any,
+    *,
+    batch_size: int = 8,
+    hierarchy_mode: str = "streaming",
+) -> list[dict[str, Any]]:
+    """同一模型完成标题分类与层级恢复，并严格按文档隔离标题栈。
+
+    返回顺序与 examples 一致。不同文档绝不能共享活动路径、根节点或全局标题清单。
+    """
+    if hierarchy_mode not in HIERARCHY_MODES:
+        raise ValueError(f"Unknown hierarchy mode: {hierarchy_mode}")
+    grouped: dict[str, list[tuple[int, HeadingExample]]] = {}
+    for index, example in enumerate(examples):
+        grouped.setdefault(example.document_id, []).append((index, example))
+    rows: list[dict[str, Any] | None] = [None] * len(examples)
+    for items in grouped.values():
+        document_examples = [example for _, example in items]
+        predictions = classifier.predict(document_examples, batch_size=batch_size)
+        resolved = HeadingHierarchyResolver(classifier, mode=hierarchy_mode).resolve(
+            document_examples, predictions,
+        )
+        for (original_index, _), row in zip(items, resolved):
+            rows[original_index] = row
+    return [row for row in rows if row is not None]

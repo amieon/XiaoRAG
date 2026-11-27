@@ -23,6 +23,7 @@ if str(SRC) not in sys.path:
 from chapter_tree.heading_classifier import (
     TransformerHeadingClassifier, load_heading_examples,
 )
+from chapter_tree.heading_hierarchy import HIERARCHY_MODES, predict_document_structure
 from chapter_tree.local_hf_classifier import LocalHFHeadingClassifier
 from chapter_tree.native_classifier import NativeHeadingClassifier
 from chapter_tree.zero_shot_classifier import OpenAICompatibleHeadingClassifier
@@ -41,6 +42,10 @@ def main() -> None:
     parser.add_argument("--without-response-format", action="store_true")
     parser.add_argument("--output", required=True, help="New prediction JSONL path")
     parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument(
+        "--hierarchy-mode", choices=HIERARCHY_MODES,
+        help="zero-shot 分类后继续用同一模型恢复 parent_id；按文档隔离标题栈",
+    )
     parser.add_argument("--max-length", type=int)
     parser.add_argument("--device", default="auto")
     args = parser.parse_args()
@@ -48,6 +53,8 @@ def main() -> None:
     output = Path(args.output)
     if args.local_model and args.mode != "zero-shot":
         raise ValueError("--local-model 只用于 --mode zero-shot")
+    if args.hierarchy_mode and args.mode != "zero-shot":
+        raise ValueError("--hierarchy-mode 需要与 --mode zero-shot 一起使用")
     if output.exists():
         raise ValueError("Prediction output already exists; use a new file")
     examples = load_heading_examples(args.input)
@@ -77,7 +84,13 @@ def main() -> None:
         classifier = TransformerHeadingClassifier(
             args.model, device=args.device, max_length=args.max_length,
         )
-    predictions = classifier.predict(examples, batch_size=args.batch_size)
+    if args.hierarchy_mode:
+        predictions = predict_document_structure(
+            examples, classifier,
+            batch_size=args.batch_size, hierarchy_mode=args.hierarchy_mode,
+        )
+    else:
+        predictions = classifier.predict(examples, batch_size=args.batch_size)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("x", encoding="utf-8") as stream:
         for prediction in predictions:
@@ -86,6 +99,13 @@ def main() -> None:
         "status": "success", "mode": args.mode, "count": len(predictions),
         "heading_count": sum(item["label"] == "heading" for item in predictions),
         "body_count": sum(item["label"] == "body" for item in predictions),
+        "document_count": len({item.document_id for item in examples}),
+        "hierarchy_mode": args.hierarchy_mode,
+        "hierarchy_model_decision_count": sum(
+            item.get("hierarchy_source") in {
+                "streaming_model", "streaming_context_model", "global_model",
+            } for item in predictions
+        ),
         "output": str(output.resolve()),
     }, ensure_ascii=False, indent=2))
 

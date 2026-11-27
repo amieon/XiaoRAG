@@ -1,0 +1,4 @@
+{
+  "classification": "internal",
+  "allowed_principals": ["group:engineering"]
+}
