@@ -124,6 +124,27 @@ class LocalHFClassifierTests(unittest.TestCase):
             self.assertEqual([row["heading_level"] for row in resolved], [1, 1])
             self.assertEqual(resolved[1]["hierarchy_source"], "streaming_model")
 
+    def test_explicit_cuda_fails_immediately_when_torch_has_no_cuda(self):
+        class UnavailableCuda:
+            @staticmethod
+            def is_available():
+                return False
+
+        class NoCudaTorch(FakeTorch):
+            cuda = UnavailableCuda()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            model_path = Path(temporary) / "Qwen"
+            model_path.mkdir()
+            (model_path / "config.json").write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "torch.cuda.is_available"):
+                LocalHFHeadingClassifier(
+                    model_path, device="cuda:0",
+                    model_loader=lambda *args, **kwargs: FakeModel(),
+                    tokenizer_loader=lambda *args, **kwargs: FakeTokenizer(lambda payload: ""),
+                    torch_module=NoCudaTorch(),
+                )
+
     def test_local_model_requires_real_directory_and_config(self):
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaisesRegex(ValueError, "containing config.json"):

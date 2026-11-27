@@ -95,6 +95,68 @@ class ZeroShotHeadingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown block_id"):
             classifier.predict([example("doc_p0001_b0000", "无编号标题")])
 
+    def test_unambiguous_upstream_labels_are_normalized_with_audit(self):
+        def transport(payload):
+            return {"choices": [{"message": {"content": json.dumps({"predictions": [
+                {"block_id": "b0", "label": "text", "heading_level": None},
+                {"block_id": "b1", "label": "paragraph_title", "heading_level": 2},
+            ]})}}]}
+
+        classifier = OpenAICompatibleHeadingClassifier(
+            base_url="http://localhost/v1", model="fake", transport=transport,
+        )
+        rows = classifier.predict([
+            example("doc_p0001_b0000", "这是正文。"),
+            example("doc_p0001_b0001", "无编号标题"),
+        ])
+        self.assertEqual([row["label"] for row in rows], ["body", "heading"])
+        self.assertEqual([row["raw_model_label"] for row in rows], ["text", "paragraph_title"])
+        self.assertEqual(rows[1]["heading_level"], 2)
+
+    def test_invalid_batch_label_retries_then_fails_with_real_block_ids(self):
+        calls = []
+
+        def transport(payload):
+            calls.append(payload)
+            return {"choices": [{"message": {"content": json.dumps({"predictions": [{
+                "block_id": "b0", "label": "invented-label", "heading_level": None,
+            }]})}}]}
+
+        classifier = OpenAICompatibleHeadingClassifier(
+            base_url="http://localhost/v1", model="fake", max_retries=1, transport=transport,
+        )
+        with self.assertRaisesRegex(ValueError, "invented-label.*doc_p0001_b0000"):
+            classifier.predict([example("doc_p0001_b0000", "正文")])
+        self.assertEqual(len(calls), 2)
+        correction = json.loads(calls[-1]["messages"][-1]["content"])
+        self.assertEqual(correction["required_block_ids"], ["b0"])
+
+    def test_incomplete_batch_automatically_splits_without_dropping_blocks(self):
+        calls = []
+
+        def transport(payload):
+            calls.append(payload)
+            user = json.loads(payload["messages"][1]["content"])
+            blocks = user["blocks"]
+            # 模拟真实小模型：多块时永远只回答 b0，单块则正确回答。
+            answered = blocks[:1]
+            return {"choices": [{"message": {"content": json.dumps({"predictions": [{
+                "block_id": item["block_id"], "label": "body", "heading_level": None,
+            } for item in answered]})}}]}
+
+        classifier = OpenAICompatibleHeadingClassifier(
+            base_url="http://localhost/v1", model="fake", max_retries=0, transport=transport,
+        )
+        rows = classifier.predict([
+            example("doc_p0001_b0000", "正文零。"),
+            example("doc_p0001_b0001", "正文一。"),
+        ], batch_size=2)
+        self.assertEqual([row["block_id"] for row in rows], [
+            "doc_p0001_b0000", "doc_p0001_b0001",
+        ])
+        self.assertEqual([row["label"] for row in rows], ["body", "body"])
+        self.assertEqual(len(calls), 3)
+
     def test_reasoning_fallback_accepts_only_valid_prediction_json(self):
         def reasoning_only(payload):
             self.assertEqual(payload["max_tokens"], 8192)

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from typing import Any, Callable, Sequence
 from urllib import error, request
 
@@ -20,7 +21,8 @@ SYSTEM_PROMPT = """你是文档结构标注器。判断每个当前块是章节�
 2. 明确的章节编号可用于判断层级，例如“第一章”为1级，“1.2”为2级，“1.2.3”为3级。
 3. 无编号标题需结合前后文判断层级；无法确定更深关系时选择1级，不要编造编号。
 4. label只能是heading或body；heading_level仅heading需要，为1到6的整数，body必须为null。
-5. 输入的每个块必须恰好输出一次，保持block_id不变。
+5. raw_label只是上游证据，不得抄入label；例如raw_label=text时，输出label应为body。
+6. 输入的每个块必须恰好输出一次，保持block_id不变。
 只输出JSON对象：{"predictions":[{"block_id":"...","label":"heading","heading_level":1}]}。
 """
 
@@ -83,22 +85,41 @@ def _json_content(content: str) -> Any:
         raise ValueError(f"Model did not return valid JSON: {exc.msg}") from exc
 
 
+MODEL_LABEL_ALIASES = {
+    "text": BODY_LABEL,
+    "paragraph": BODY_LABEL,
+    "body_text": BODY_LABEL,
+    "正文": BODY_LABEL,
+    "title": HEADING_LABEL,
+    "doc_title": HEADING_LABEL,
+    "paragraph_title": HEADING_LABEL,
+    "section_heading": HEADING_LABEL,
+    "标题": HEADING_LABEL,
+}
+
+
 def _validated_prediction(value: Any, expected_ids: set[str]) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("Each model prediction must be an object")
     block_id = value.get("block_id")
-    label = value.get("label")
+    raw_label = value.get("label")
+    label = raw_label
+    if isinstance(raw_label, str):
+        label = MODEL_LABEL_ALIASES.get(raw_label.strip().casefold(), raw_label.strip().casefold())
     level = value.get("heading_level")
     if not isinstance(block_id, str) or block_id not in expected_ids:
         raise ValueError(f"Model returned an unknown block_id: {block_id!r}")
     if label not in {BODY_LABEL, HEADING_LABEL}:
-        raise ValueError(f"Invalid heading label for {block_id}: {label!r}")
+        raise ValueError(f"Invalid heading label for {block_id}: {raw_label!r}")
     if label == HEADING_LABEL:
         if type(level) is not int or not 1 <= level <= 6:
             raise ValueError(f"Heading {block_id} requires heading_level in 1..6")
     elif level is not None:
         raise ValueError(f"Body {block_id} must have heading_level=null")
-    return {"block_id": block_id, "label": label, "heading_level": level}
+    result = {"block_id": block_id, "label": label, "heading_level": level}
+    if raw_label != label:
+        result["raw_model_label"] = raw_label
+    return result
 
 
 class OpenAICompatibleHeadingClassifier:
@@ -114,6 +135,7 @@ class OpenAICompatibleHeadingClassifier:
         max_tokens: int = 4096,
         use_response_format: bool = True,
         disable_thinking: bool = False,
+        max_retries: int = 2,
         transport: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ) -> None:
         if not model.strip():
@@ -122,6 +144,8 @@ class OpenAICompatibleHeadingClassifier:
             raise ValueError("timeout must be positive")
         if max_tokens < 256:
             raise ValueError("max_tokens must be at least 256")
+        if max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
         self.url = _endpoint(base_url)
         self.model = model.strip()
         self.api_key = api_key if api_key is not None else os.environ.get("HEADING_MODEL_API_KEY")
@@ -129,6 +153,7 @@ class OpenAICompatibleHeadingClassifier:
         self.max_tokens = max_tokens
         self.use_response_format = use_response_format
         self.disable_thinking = disable_thinking
+        self.max_retries = max_retries
         self.transport = transport
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -181,23 +206,77 @@ class OpenAICompatibleHeadingClassifier:
             # Qwen 兼容服务常见两种开关；只有用户显式要求时才发送这些扩展字段。
             payload["enable_thinking"] = False
             payload["chat_template_kwargs"] = {"enable_thinking": False}
-        response = self._post(payload)
-        decoded = _json_content(_content(response))
-        rows = decoded.get("predictions") if isinstance(decoded, dict) else decoded
-        if not isinstance(rows, list):
-            raise ValueError("Model JSON must contain a predictions array")
-        validated = [_validated_prediction(row, expected_ids) for row in rows]
-        ids = [row["block_id"] for row in validated]
-        if len(ids) != len(set(ids)):
-            raise ValueError("Model returned duplicate block_id values")
-        if set(ids) != expected_ids or len(ids) != len(local_ids):
-            missing = sorted(expected_ids - set(ids))
-            raise ValueError(f"Model must return every input block exactly once; missing={missing[:3]}")
-        by_id = {row["block_id"]: row for row in validated}
-        return [
-            {**by_id[local_id], "block_id": real_id}
-            for local_id, real_id in zip(local_ids, real_ids)
-        ]
+        messages = payload["messages"]
+        for attempt in range(self.max_retries + 1):
+            content = ""
+            try:
+                response = self._post({**payload, "messages": messages})
+                content = _content(response)
+                decoded = _json_content(content)
+                rows = decoded.get("predictions") if isinstance(decoded, dict) else decoded
+                if not isinstance(rows, list):
+                    raise ValueError("Model JSON must contain a predictions array")
+                validated = [_validated_prediction(row, expected_ids) for row in rows]
+                ids = [row["block_id"] for row in validated]
+                if len(ids) != len(set(ids)):
+                    raise ValueError("Model returned duplicate block_id values")
+                if set(ids) != expected_ids or len(ids) != len(local_ids):
+                    missing = sorted(expected_ids - set(ids))
+                    raise ValueError(
+                        f"Model must return every input block exactly once; missing={missing[:3]}"
+                    )
+                by_id = {row["block_id"]: row for row in validated}
+                return [
+                    {**by_id[local_id], "block_id": real_id}
+                    for local_id, real_id in zip(local_ids, real_ids)
+                ]
+            except ValueError as exc:
+                if attempt == self.max_retries:
+                    raise ValueError(
+                        f"{exc}; batch_block_ids={real_ids!r}"
+                    ) from exc
+                print(
+                    f"[heading] invalid batch response; retry "
+                    f"{attempt + 1}/{self.max_retries}: {exc}",
+                    file=sys.stderr, flush=True,
+                )
+                correction = json.dumps({
+                    "error": str(exc),
+                    "instruction": (
+                        "重新标注同一批块。每个输入block_id恰好输出一次；"
+                        "label只能是heading或body，不得复制raw_label；"
+                        "heading_level仅heading为1到6的整数，body必须为null。"
+                    ),
+                    "required_block_ids": local_ids,
+                    "output": {"predictions": [{
+                        "block_id": "从required_block_ids中逐字复制",
+                        "label": "heading或body",
+                        "heading_level": "heading填1到6；body填null",
+                    }]},
+                }, ensure_ascii=False)
+                messages = messages + [
+                    {"role": "assistant", "content": content},
+                    {"role": "user", "content": correction},
+                ]
+        raise AssertionError("unreachable")
+
+    def _predict_with_partition(
+        self, examples: Sequence[HeadingExample],
+    ) -> list[dict[str, Any]]:
+        try:
+            return self._predict_batch(examples)
+        except ValueError as exc:
+            if len(examples) <= 1:
+                raise
+            middle = len(examples) // 2
+            print(
+                f"[heading] batch of {len(examples)} failed after retries; "
+                f"splitting into {middle} + {len(examples) - middle}: {exc}",
+                file=sys.stderr, flush=True,
+            )
+            return self._predict_with_partition(examples[:middle]) + self._predict_with_partition(
+                examples[middle:]
+            )
 
     def predict(
         self, examples: Sequence[HeadingExample], *, batch_size: int = 8,
@@ -209,7 +288,7 @@ class OpenAICompatibleHeadingClassifier:
         results: list[dict[str, Any] | None] = list(native)
         for start in range(0, len(unresolved), batch_size):
             indices = unresolved[start:start + batch_size]
-            predictions = self._predict_batch([examples[index] for index in indices])
+            predictions = self._predict_with_partition([examples[index] for index in indices])
             for index, prediction in zip(indices, predictions):
                 item = examples[index]
                 results[index] = {
