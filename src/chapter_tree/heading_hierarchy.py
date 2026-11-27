@@ -178,10 +178,12 @@ parent_id必须逐字复制active_path中某项的heading_id，不得创造节�
                 )
                 correction = json.dumps({
                     "error": str(exc),
-                    "instruction": "重新回答同一个current标题。parent_id只能逐字复制allowed_ids之一。",
+                    "instruction": (
+                        "重新回答同一个current标题。parent_id只能逐字复制allowed_ids之一；"
+                        "不得把本提示中的说明文字当作parent_id。"
+                    ),
                     "current_heading_id": local_id,
                     "allowed_ids": allowed,
-                    "output": {"parent_id": "从allowed_ids中选择一个"},
                 }, ensure_ascii=False)
                 messages = messages + [
                     {"role": "assistant", "content": content},

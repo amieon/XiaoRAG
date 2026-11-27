@@ -235,6 +235,7 @@ class HeadingHierarchyTests(unittest.TestCase):
         correction = json.loads(calls[1]["messages"][-1]["content"])
         self.assertEqual(correction["allowed_ids"], ["root", "h000"])
         self.assertEqual(correction["current_heading_id"], "h001")
+        self.assertNotIn("output", correction)
         self.assertEqual(resolved[1]["hierarchy_parent_id"], items[0].block_id)
 
     def test_streaming_persistent_invalid_parent_fails_with_current_block_and_candidates(self):

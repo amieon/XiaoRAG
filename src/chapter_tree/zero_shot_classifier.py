@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from typing import Any, Callable, Sequence
 from urllib import error, request
@@ -23,6 +24,7 @@ SYSTEM_PROMPT = """你是文档结构标注器。判断每个当前块是章节�
 4. label只能是heading或body；heading_level仅heading需要，为1到6的整数，body必须为null。
 5. raw_label只是上游证据，不得抄入label；例如raw_label=text时，输出label应为body。
 6. 输入的每个块必须恰好输出一次，保持block_id不变。
+7. 不得输出text、body或其他额外字段，不得复述原文。
 只输出JSON对象：{"predictions":[{"block_id":"...","label":"heading","heading_level":1}]}。
 """
 
@@ -85,6 +87,26 @@ def _json_content(content: str) -> Any:
         raise ValueError(f"Model did not return valid JSON: {exc.msg}") from exc
 
 
+def _recover_single_prediction_from_invalid_json(
+    content: str, expected_ids: set[str],
+) -> list[dict[str, Any]] | None:
+    """仅从单块坏 JSON 提取唯一白名单字段；任何歧义都失败关闭。"""
+    if len(expected_ids) != 1 or '"predictions"' not in content:
+        return None
+    expected_id = next(iter(expected_ids))
+    block_ids = re.findall(r'"block_id"\s*:\s*"([^"\r\n]+)"', content)
+    labels = re.findall(r'"label"\s*:\s*"([^"\r\n]+)"', content)
+    levels = re.findall(r'"heading_level"\s*:\s*(null|[1-6])(?=\s*[,}])', content)
+    if block_ids != [expected_id] or len(labels) != 1 or len(levels) > 1:
+        return None
+    row: dict[str, Any] = {"block_id": expected_id, "label": labels[0]}
+    if levels:
+        row["heading_level"] = None if levels[0] == "null" else int(levels[0])
+    else:
+        row["heading_level"] = None
+    return [row]
+
+
 MODEL_LABEL_ALIASES = {
     "text": BODY_LABEL,
     "paragraph": BODY_LABEL,
@@ -114,11 +136,15 @@ def _validated_prediction(value: Any, expected_ids: set[str]) -> dict[str, Any]:
     if label == HEADING_LABEL:
         if type(level) is not int or not 1 <= level <= 6:
             raise ValueError(f"Heading {block_id} requires heading_level in 1..6")
-    elif level is not None:
-        raise ValueError(f"Body {block_id} must have heading_level=null")
-    result = {"block_id": block_id, "label": label, "heading_level": level}
+    result = {
+        "block_id": block_id,
+        "label": label,
+        "heading_level": level if label == HEADING_LABEL else None,
+    }
     if raw_label != label:
         result["raw_model_label"] = raw_label
+    if label == BODY_LABEL and level is not None:
+        result["raw_model_heading_level"] = level
     return result
 
 
@@ -212,11 +238,26 @@ class OpenAICompatibleHeadingClassifier:
             try:
                 response = self._post({**payload, "messages": messages})
                 content = _content(response)
-                decoded = _json_content(content)
-                rows = decoded.get("predictions") if isinstance(decoded, dict) else decoded
+                format_recovery = None
+                try:
+                    decoded = _json_content(content)
+                    rows = decoded.get("predictions") if isinstance(decoded, dict) else decoded
+                except ValueError:
+                    rows = _recover_single_prediction_from_invalid_json(content, expected_ids)
+                    if rows is None:
+                        raise
+                    format_recovery = "whitelist_fields_from_invalid_json"
                 if not isinstance(rows, list):
                     raise ValueError("Model JSON must contain a predictions array")
                 validated = [_validated_prediction(row, expected_ids) for row in rows]
+                if format_recovery:
+                    for row in validated:
+                        row["format_recovery"] = format_recovery
+                    print(
+                        f"[heading] recovered whitelisted fields from invalid JSON: "
+                        f"block_ids={sorted(expected_ids)}",
+                        file=sys.stderr, flush=True,
+                    )
                 ids = [row["block_id"] for row in validated]
                 if len(ids) != len(set(ids)):
                     raise ValueError("Model returned duplicate block_id values")
@@ -233,11 +274,12 @@ class OpenAICompatibleHeadingClassifier:
             except ValueError as exc:
                 if attempt == self.max_retries:
                     raise ValueError(
-                        f"{exc}; batch_block_ids={real_ids!r}"
+                        f"{exc}; batch_block_ids={real_ids!r}; raw_response={content[:500]!r}"
                     ) from exc
                 print(
                     f"[heading] invalid batch response; retry "
-                    f"{attempt + 1}/{self.max_retries}: {exc}",
+                    f"{attempt + 1}/{self.max_retries}: {exc}; "
+                    f"raw_response={content[:500]!r}",
                     file=sys.stderr, flush=True,
                 )
                 correction = json.dumps({
@@ -246,13 +288,9 @@ class OpenAICompatibleHeadingClassifier:
                         "重新标注同一批块。每个输入block_id恰好输出一次；"
                         "label只能是heading或body，不得复制raw_label；"
                         "heading_level仅heading为1到6的整数，body必须为null。"
+                        "不得把本提示中的说明文字当作block_id或输出值。"
                     ),
                     "required_block_ids": local_ids,
-                    "output": {"predictions": [{
-                        "block_id": "从required_block_ids中逐字复制",
-                        "label": "heading或body",
-                        "heading_level": "heading填1到6；body填null",
-                    }]},
                 }, ensure_ascii=False)
                 messages = messages + [
                     {"role": "assistant", "content": content},

@@ -130,6 +130,54 @@ class ZeroShotHeadingTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         correction = json.loads(calls[-1]["messages"][-1]["content"])
         self.assertEqual(correction["required_block_ids"], ["b0"])
+        self.assertNotIn("output", correction)
+        self.assertNotIn("从required_block_ids", calls[-1]["messages"][-1]["content"])
+
+    def test_single_block_invalid_json_recovers_only_unique_whitelisted_fields(self):
+        raw = (
+            '{"predictions":[{"block_id":"b0","label":"body",'
+            '"body":"26、题目第一行\nA、第二行\nB、第三行"}]}'
+        )
+        classifier = OpenAICompatibleHeadingClassifier(
+            base_url="http://localhost/v1", model="fake",
+            transport=lambda payload: {"choices": [{"message": {"content": raw}}]},
+        )
+        row = classifier.predict([example("doc_p0001_b0000", "26、题目")])[0]
+        self.assertEqual(row["block_id"], "doc_p0001_b0000")
+        self.assertEqual(row["label"], "body")
+        self.assertIsNone(row["heading_level"])
+        self.assertEqual(row["format_recovery"], "whitelist_fields_from_invalid_json")
+        self.assertNotIn("body", row)
+
+    def test_invalid_json_recovery_rejects_unknown_or_duplicate_ids(self):
+        cases = [
+            '{"predictions":[{"block_id":"invented","label":"body","body":"坏JSON\n"}]}',
+            '{"predictions":[{"block_id":"b0","label":"body"},{"block_id":"b0","label":"body"}',
+        ]
+        for raw in cases:
+            with self.subTest(raw=raw):
+                classifier = OpenAICompatibleHeadingClassifier(
+                    base_url="http://localhost/v1", model="fake", max_retries=0,
+                    transport=lambda payload, value=raw: {
+                        "choices": [{"message": {"content": value}}]
+                    },
+                )
+                with self.assertRaisesRegex(ValueError, "did not return valid JSON"):
+                    classifier.predict([example("doc_p0001_b0000", "正文")])
+
+    def test_body_heading_level_is_normalized_to_null_with_audit(self):
+        def transport(payload):
+            return {"choices": [{"message": {"content": json.dumps({"predictions": [{
+                "block_id": "b0", "label": "body", "heading_level": 6,
+            }]})}}]}
+
+        classifier = OpenAICompatibleHeadingClassifier(
+            base_url="http://localhost/v1", model="fake", transport=transport,
+        )
+        row = classifier.predict([example("doc_p0001_b0000", "正文")])[0]
+        self.assertEqual(row["label"], "body")
+        self.assertIsNone(row["heading_level"])
+        self.assertEqual(row["raw_model_heading_level"], 6)
 
     def test_incomplete_batch_automatically_splits_without_dropping_blocks(self):
         calls = []
