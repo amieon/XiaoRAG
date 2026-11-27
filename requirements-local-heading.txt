@@ -1,0 +1,6 @@
+# 本地 HF 标题／层级模型；PyTorch CUDA 版本应与现有 OCR 环境一致。
+torch
+transformers>=4.51
+accelerate
+huggingface_hub
+# AWQ 模型另需与当前 torch/transformers 兼容的 autoawq；请按模型卡安装，避免它擅自降级整个主环境。

@@ -128,6 +128,12 @@ class PaddleModelBackend:
             )
             if ready.get("event") != "READY":
                 raise RuntimeError(f"OCR worker did not become ready: {ready}")
+            print(
+                f"[OCR worker] READY in {ready.get('load_seconds', 0):.2f}s "
+                f"({ready.get('inference_engine')}, {ready.get('device')})",
+                file=sys.stderr,
+                flush=True,
+            )
         except BaseException:
             self.close()
             raise

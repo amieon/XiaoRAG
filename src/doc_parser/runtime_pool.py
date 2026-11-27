@@ -9,6 +9,7 @@ from pathlib import Path
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 from typing import Any, Callable
 
@@ -126,9 +127,11 @@ class PageRuntimePool:
         return asdict(snapshot) if snapshot is not None else None
 
     def _create_runtime(self, index: int) -> Any:
+        print(f"[runtime] loading worker {index}", file=sys.stderr, flush=True)
         runtime = self._runtime_factory()
         self._runtimes.append(runtime)
         self.report["events"].append({"event": "runtime_loaded", "index": index})
+        print(f"[runtime] worker {index} loaded", file=sys.stderr, flush=True)
         return runtime
 
     def _initialize(self) -> None:

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import threading
 from typing import Any, Callable
 
@@ -27,6 +28,10 @@ from .runtime_pool import PageRuntimePool, resolve_cpu_workers
 BATCH_SCHEMA_VERSION = "document-folder-batch.v2"
 IGNORED_DIRECTORIES = {".git", ".svn", ".venv", ".idea", "__pycache__", "node_modules"}
 IGNORED_FILES = {".ds_store", "thumbs.db", "desktop.ini"}
+
+
+def _progress(message: str) -> None:
+    print(f"[document] {message}", file=sys.stderr, flush=True)
 
 
 def _read(path: Path) -> dict:
@@ -180,9 +185,11 @@ def run_document(
     """预处理一个文件，并把其中所有视觉页一次性提交给共享页池。"""
     config = config or ParserConfig()
     source, output_root = Path(input_path).resolve(), Path(output).resolve()
+    _progress(f"preparing {source.name}")
     prepared = prepare_document(
         source, output_root, dpi=dpi, office_converter=office_converter, max_pages=max_pages,
     )
+    _progress(f"prepared {source.name}: visual_pages={prepared.get('page_count', 0)}")
     document_id = "doc_" + prepared["source_sha256"][:16]
     page_inputs = _collect_pages(output_root)
     results_root = output_root / "results"
@@ -219,7 +226,9 @@ def run_document(
                     "output_dir": package_root / "results" / "pages" / f"{int(package['page_no']):04d}",
                 })
             # 页池可以跨文档共享；这里按 jobs 原序取回结果，避免并发改变阅读顺序。
+            _progress(f"submitted {source.name}: pages={len(jobs)}")
             page_results = runtime_pool.parse_pages(jobs)
+            _progress(f"recognized {source.name}: pages={len(page_results)}")
 
         pages: list[Page] = []
         all_routes: list[dict] = []

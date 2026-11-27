@@ -102,7 +102,11 @@ TXT/CSV/Markdown 等纯文本按 BOM、UTF-8、GB18030 顺序严格解码，并�
 .venv\Scripts\python.exe scripts\run_parser.py --input "待处理目录" --output "var\parsed" --config config\parser.json --build-knowledge-units --knowledge-unit-config config\knowledge_units.json
 ```
 
-布局模型与 VLM 默认使用 `paddle_dynamic`，轻量 OCR 使用 `paddle_static`。Torch 仅供图像预处理，不要为了 Transformers 推理改装 CUDA 版 Torch；混合加载 Paddle 与 CUDA Torch 曾在 Windows 上引发 cuDNN DLL 冲突。原生 Paddle/SentencePiece 加载器对中文绝对路径存在兼容性问题，默认模型路径使用项目根目录下的 ASCII 相对路径，因此完整识别命令应从项目根目录执行。
+布局模型与 VLM 默认使用 `paddle_dynamic`，轻量 OCR 使用 `paddle_static`。Torch 仅供图像预处理，不要为了 Transformers 推理改装 CUDA 版 Torch；混合加载 Paddle 与 CUDA Torch 曾在 Windows 上引发 cuDNN DLL 冲突。原生 Paddle/SentencePiece 加载器对中文绝对路径存在兼容性问题，默认模型路径使用项目根目录下的 ASCII 相对路径，因此完整识别命令应从项目根目录执行。**项目根目录本身也应只含 ASCII 字符**：即使配置写 `models\\...`，底层仍可能通过中文当前目录生成绝对路径。项目已在中文目录时，可用 `mklink /J C:\\doc-platform "原项目路径"` 建立目录联接，再从 `C:\\doc-platform` 启动，无需复制模型或修改原文件。
+
+轻量 OCR 启动会依次打印 `[light-ocr] initializing`、`model initialized ...; sending READY` 和父进程收到的 `[OCR worker] READY`。`Creating model` 后的 `paddle.to_tensor` 是警告而非异常；首次静态图初始化可能需要等待。超过 `PADDLEOCR_WORKER_READY_TIMEOUT`（默认 600 秒）时，worker 会转储 Python 栈并退出，便于区分慢初始化和真实死锁。
+
+`READY` 之后还会输出文档 `preparing/prepared/submitted/recognized`、运行时 `loading/loaded`，以及每页的 `layout started/finished`、`light OCR started/finished`、`VLM started/finished`。因此长任务可定位到具体文档、页和模型调用，不再以最后一条第三方 warning 猜测状态。排查悬挂时使用新的输出目录，并以 `--cpu-workers 1 --gpu-workers 1 --max-pages-per-document 1` 做单页最小复现；轻量 OCR 的启动／推理超时不等同于版面或 VLM 调用的超时。
 
 默认模型目录：
 

@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field
 import json
 import math
 from pathlib import Path
+import sys
 from typing import Any, Mapping, Protocol
 
 from chapter_tree.context import build_crop_context
@@ -26,6 +27,10 @@ from .routing import (
 
 
 PIPELINE_VERSION = "document-ir-v2"
+
+
+def _progress(document_id: str, page_no: int, message: str) -> None:
+    print(f"[page {document_id} p{page_no:04d}] {message}", file=sys.stderr, flush=True)
 
 
 class Backend(Protocol):
@@ -431,18 +436,37 @@ class RegionPipeline:
         with Image.open(source) as image:
             array = np.asarray(image.convert("RGB"))
         height, width = array.shape[:2]
+        _progress(document_id, page_no, "layout started")
         layout = public_result_dict(self.backend.detect_layout(array))
+        _progress(document_id, page_no, "layout finished")
         regions = build_regions(
             array, layout, native_blocks=native_blocks, config=self.config,
         )
         page_index = page_no - 1
         groups = group_regions(regions, page_index=page_index)
+        _progress(
+            document_id, page_no,
+            f"recognition started: regions={len(regions)} groups={len(groups)}",
+        )
+        def recognize_text(images: list[Any]) -> list[dict[str, Any]]:
+            _progress(document_id, page_no, f"light OCR started: crops={len(images)}")
+            outputs = self.backend.recognize_text(images)
+            _progress(document_id, page_no, f"light OCR finished: crops={len(images)}")
+            return outputs
+
+        def recognize_vlm(vlm_groups: dict[tuple[int, int], dict]) -> None:
+            count = sum(len(group["images"]) for group in vlm_groups.values())
+            _progress(document_id, page_no, f"VLM started: crops={count}")
+            self.backend.recognize_vlm(vlm_groups)
+            _progress(document_id, page_no, f"VLM finished: crops={count}")
+
         records = route_visual_groups(
             groups,
-            self.backend.recognize_text,
-            self.backend.recognize_vlm,
+            recognize_text,
+            recognize_vlm,
             gate=self.gate,
         )
+        _progress(document_id, page_no, "recognition finished")
         outputs: dict[tuple[int, int], dict] = {}
         for group in groups.values():
             outputs.update({

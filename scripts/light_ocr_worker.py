@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import faulthandler
 import json
 import os
 from pathlib import Path
@@ -92,11 +93,25 @@ def main():
     # 模型库可能直接 print；协议消息只能走原 stdout，其余日志统一转 stderr。
     with contextlib.redirect_stdout(sys.stderr):
         started = time.perf_counter()
-        model = build_model(project)
+        engine = os.environ.get("PADDLEOCR_ENGINE", "paddle_static")
+        device = os.environ.get("PADDLEOCR_DEVICE", "gpu:0")
+        print(f"[light-ocr] initializing engine={engine} device={device}", file=sys.stderr, flush=True)
+        startup_timeout = float(os.environ.get("PADDLEOCR_WORKER_READY_TIMEOUT", "600"))
+        # 真正死锁时留下 worker 的 Python 栈并退出；父进程随后会收到 EOF，而非无声悬挂。
+        faulthandler.dump_traceback_later(startup_timeout, exit=True)
+        try:
+            model = build_model(project)
+        finally:
+            faulthandler.cancel_dump_traceback_later()
+        print(
+            f"[light-ocr] model initialized in {time.perf_counter() - started:.2f}s; sending READY",
+            file=sys.stderr,
+            flush=True,
+        )
         ready = {
             "event": "READY",
             "engine": "paddleocr",
-            "inference_engine": os.environ.get("PADDLEOCR_ENGINE", "paddle_static"),
+            "inference_engine": engine,
             "det_model": os.environ.get("PADDLEOCR_TEXT_DET_MODEL_NAME", "PP-OCRv6_small_det"),
             "rec_model": os.environ.get("PADDLEOCR_TEXT_REC_MODEL_NAME", "PP-OCRv6_small_rec"),
             "load_seconds": time.perf_counter() - started,
@@ -113,6 +128,7 @@ def main():
         try:
             outputs = []
             started = time.perf_counter()
+            print(f"[light-ocr] request started: crops={len(request['images'])}", file=sys.stderr, flush=True)
             with contextlib.redirect_stdout(sys.stderr):
                 for name in request["images"]:
                     image = np.load(name, allow_pickle=False)
@@ -120,8 +136,10 @@ def main():
                     outputs.append(_extract_result(result) if result is not None else {
                         "result": "", "line_scores": [], "line_boxes": [],
                     })
+            elapsed = time.perf_counter() - started
+            print(f"[light-ocr] request finished in {elapsed:.2f}s", file=sys.stderr, flush=True)
             print(json.dumps({
-                "outputs": outputs, "seconds": time.perf_counter() - started,
+                "outputs": outputs, "seconds": elapsed,
             }, ensure_ascii=False), file=protocol, flush=True)
         except Exception:
             # 单次请求失败通过协议返回，不让 worker 静默退出后造成父进程悬挂。
