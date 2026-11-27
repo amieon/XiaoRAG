@@ -68,6 +68,7 @@ class ModelBackendEncodingTests(unittest.TestCase):
             self.assertNotIn("text", kwargs)
             self.assertNotIn("encoding", kwargs)
             self.assertEqual(kwargs["env"]["PYTHONIOENCODING"], "utf-8")
+            self.assertEqual(kwargs["env"]["FLAGS_allocator_strategy"], "naive_best_fit")
             backend.close()
         self.assertEqual(worker.stdin.getvalue(), b'{"stop":true}\n')
 

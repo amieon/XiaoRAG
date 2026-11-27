@@ -48,6 +48,8 @@ def _extract_result(result):
 
 
 def _configure_environment(project: Path):
+    # 与父进程保持一致，且必须先于 paddleocr/paddle 导入。
+    os.environ.setdefault("FLAGS_allocator_strategy", "naive_best_fit")
     os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(project / ".cache" / "paddlex"))
     os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
     os.environ.setdefault("HF_HOME", str(project / ".cache" / "huggingface-paddleocr"))

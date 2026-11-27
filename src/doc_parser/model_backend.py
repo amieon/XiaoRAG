@@ -21,6 +21,9 @@ from .process_output import decode_process_output
 
 
 def _set_model_environment(root: Path) -> None:
+    # PaddleOCR-VL-1.6 本地 GPU 解码存在分配器无限等待报告；必须在导入 Paddle 前设置。
+    # 用户仍可通过同名环境变量显式覆盖；这不是 OCR 识别参数或超时替代品。
+    os.environ.setdefault("FLAGS_allocator_strategy", "naive_best_fit")
     os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(root / ".cache" / "paddlex"))
     os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
     os.environ.setdefault("HF_HOME", str(root / ".cache" / "huggingface-paddleocr"))

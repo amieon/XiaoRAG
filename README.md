@@ -106,6 +106,8 @@ TXT/CSV/Markdown 等纯文本按 BOM、UTF-8、GB18030 顺序严格解码，并�
 
 轻量 OCR 启动会依次打印 `[light-ocr] initializing`、`model initialized ...; sending READY` 和父进程收到的 `[OCR worker] READY`。`Creating model` 后的 `paddle.to_tensor` 是警告而非异常；首次静态图初始化可能需要等待。超过 `PADDLEOCR_WORKER_READY_TIMEOUT`（默认 600 秒）时，worker 会转储 Python 栈并退出，便于区分慢初始化和真实死锁。
 
+PaddleOCR 上游 issue #17693 报告了相同依赖组合下 VL-1.6 本地 GPU 自回归解码的分配器无限等待。项目在导入 Paddle 前默认设置 `FLAGS_allocator_strategy=naive_best_fit`，worker 同步继承；用户可在启动进程前显式覆盖。该规避仍需在本机对真实 VLM 推理验证，不能由无模型单元测试代替。
+
 `READY` 之后还会输出文档 `preparing/prepared/submitted/recognized`、运行时 `loading/loaded`，以及每页的 `layout started/finished`、`light OCR started/finished`、`VLM started/finished`。因此长任务可定位到具体文档、页和模型调用，不再以最后一条第三方 warning 猜测状态。排查悬挂时使用新的输出目录，并以 `--cpu-workers 1 --gpu-workers 1 --max-pages-per-document 1` 做单页最小复现；轻量 OCR 的启动／推理超时不等同于版面或 VLM 调用的超时。
 
 默认模型目录：
