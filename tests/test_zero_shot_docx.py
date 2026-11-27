@@ -179,6 +179,29 @@ class ZeroShotHeadingTests(unittest.TestCase):
         self.assertIsNone(row["heading_level"])
         self.assertEqual(row["raw_model_heading_level"], 6)
 
+    def test_model_invented_extra_ids_are_discarded_only_after_required_coverage(self):
+        rows = [
+            {"block_id": "b0", "label": "body", "body": "真实输入"},
+            {"block_id": "b1", "label": "body", "body": "虚构题一"},
+            {"block_id": "b2", "label": "body", "body": "虚构题二"},
+        ]
+        classifier = OpenAICompatibleHeadingClassifier(
+            base_url="http://localhost/v1", model="fake",
+            transport=lambda payload: {"choices": [{"message": {"content": json.dumps({
+                "predictions": rows,
+            }, ensure_ascii=False)}}]},
+        )
+        row = classifier.predict([example("doc_p0001_b0000", "真实输入")])[0]
+        self.assertEqual(row["block_id"], "doc_p0001_b0000")
+        self.assertEqual(row["label"], "body")
+        self.assertEqual(row["discarded_extra_block_ids"], ["b1", "b2"])
+
+        classifier.transport = lambda payload: {"choices": [{"message": {"content": json.dumps({
+            "predictions": rows[1:],
+        })}}]}
+        with self.assertRaisesRegex(ValueError, "unknown block_id"):
+            classifier.predict([example("doc_p0001_b0000", "真实输入")])
+
     def test_identical_duplicate_predictions_collapse_but_conflicts_fail(self):
         duplicate_rows = [
             {"block_id": "b0", "label": "body", "body": "选项一"},

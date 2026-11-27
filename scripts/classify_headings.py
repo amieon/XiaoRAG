@@ -41,6 +41,10 @@ def main() -> None:
     parser.add_argument("--disable-thinking", action="store_true")
     parser.add_argument("--without-response-format", action="store_true")
     parser.add_argument("--output", required=True, help="New prediction JSONL path")
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="从同一输入、模型和层级模式的按文档 JSONL 检查点续跑",
+    )
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument(
         "--hierarchy-mode", choices=HIERARCHY_MODES,
@@ -55,8 +59,21 @@ def main() -> None:
         raise ValueError("--local-model 只用于 --mode zero-shot")
     if args.hierarchy_mode and args.mode != "zero-shot":
         raise ValueError("--hierarchy-mode 需要与 --mode zero-shot 一起使用")
-    if output.exists():
-        raise ValueError("Prediction output already exists; use a new file")
+    if args.resume and not args.hierarchy_mode:
+        raise ValueError("--resume 目前需要与 --hierarchy-mode 一起使用")
+    if output.exists() and not args.resume:
+        raise ValueError("Prediction output already exists; use a new file or --resume")
+    resumed_predictions = []
+    if args.resume and output.exists():
+        with output.open("r", encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, 1):
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if not isinstance(row, dict) or not isinstance(row.get("document_id"), str):
+                    raise ValueError(f"Invalid resume prediction at line {line_number}")
+                resumed_predictions.append(row)
+    completed_document_ids = {row["document_id"] for row in resumed_predictions}
     examples = load_heading_examples(args.input)
     if args.mode == "native":
         classifier = NativeHeadingClassifier()
@@ -84,22 +101,41 @@ def main() -> None:
         classifier = TransformerHeadingClassifier(
             args.model, device=args.device, max_length=args.max_length,
         )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    predictions = list(resumed_predictions)
     if args.hierarchy_mode:
-        predictions = predict_document_structure(
-            examples, classifier,
-            batch_size=args.batch_size, hierarchy_mode=args.hierarchy_mode,
-        )
+        grouped = {}
+        for example in examples:
+            grouped.setdefault(example.document_id, []).append(example)
+        with output.open("a" if args.resume else "x", encoding="utf-8") as stream:
+            for document_id, document_examples in grouped.items():
+                if document_id in completed_document_ids:
+                    print(f"[structure] resume skip completed document: {document_id}", flush=True)
+                    continue
+                document_predictions = predict_document_structure(
+                    document_examples, classifier,
+                    batch_size=args.batch_size, hierarchy_mode=args.hierarchy_mode,
+                )
+                for prediction in document_predictions:
+                    stream.write(json.dumps(prediction, ensure_ascii=False) + "\n")
+                stream.flush()
+                predictions.extend(document_predictions)
+                print(
+                    f"[structure] checkpoint saved: document={document_id}; "
+                    f"blocks={len(document_predictions)}",
+                    flush=True,
+                )
     else:
         predictions = classifier.predict(examples, batch_size=args.batch_size)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("x", encoding="utf-8") as stream:
-        for prediction in predictions:
-            stream.write(json.dumps(prediction, ensure_ascii=False) + "\n")
+        with output.open("x", encoding="utf-8") as stream:
+            for prediction in predictions:
+                stream.write(json.dumps(prediction, ensure_ascii=False) + "\n")
     print(json.dumps({
         "status": "success", "mode": args.mode, "count": len(predictions),
         "heading_count": sum(item["label"] == "heading" for item in predictions),
         "body_count": sum(item["label"] == "body" for item in predictions),
         "document_count": len({item.document_id for item in examples}),
+        "resumed_document_count": len(completed_document_ids),
         "hierarchy_mode": args.hierarchy_mode,
         "hierarchy_model_decision_count": sum(
             item.get("hierarchy_source") in {

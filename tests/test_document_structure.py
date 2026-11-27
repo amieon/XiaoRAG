@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import io
+import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "scripts"))
+import classify_headings
 from chapter_tree.heading_classifier import HeadingExample
 from chapter_tree.heading_hierarchy import predict_document_structure
 from chapter_tree.tree import build_chapter_tree
@@ -88,6 +95,54 @@ class DocumentStructureTests(unittest.TestCase):
         tree = build_chapter_tree(blocks, document_id="doc_a", predictions=predictions)
         self.assertEqual(tree["stats"]["heading_block_count"], 0)
         self.assertEqual(tree["stats"]["flat_document"], True)
+
+    def test_cli_resume_skips_documents_already_saved_in_the_checkpoint(self):
+        items = [
+            example("a0", "doc_a", "已完成文档", "paragraph_title"),
+            example("b0", "doc_b", "待处理文档", "paragraph_title"),
+        ]
+
+        class FakeClassifier:
+            def __init__(self):
+                self.seen_documents = []
+
+            def predict(self, examples, *, batch_size=8):
+                self.seen_documents.append({item.document_id for item in examples})
+                return [{
+                    "block_id": item.block_id,
+                    "page_id": item.page_id,
+                    "document_id": item.document_id,
+                    "reading_order": item.reading_order,
+                    "label": "heading",
+                    "heading_level": 1,
+                    "native_heading_count": 0,
+                    "native_evidence": [],
+                } for item in examples]
+
+        classifier = FakeClassifier()
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "predictions.jsonl"
+            completed = {
+                "block_id": "a0", "document_id": "doc_a", "label": "heading",
+                "heading_level": 1, "hierarchy_source": "document_root",
+            }
+            output.write_text(json.dumps(completed) + "\n", encoding="utf-8")
+            arguments = [
+                "classify_headings.py", "--input", "unused", "--mode", "zero-shot",
+                "--local-model", "fake", "--hierarchy-mode", "none", "--resume",
+                "--output", str(output),
+            ]
+            with (
+                mock.patch.object(sys, "argv", arguments),
+                mock.patch.object(classify_headings, "load_heading_examples", return_value=items),
+                mock.patch.object(classify_headings, "LocalHFHeadingClassifier", return_value=classifier),
+                mock.patch("sys.stdout", new=io.StringIO()),
+            ):
+                classify_headings.main()
+            rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(classifier.seen_documents, [{"doc_b"}])
+        self.assertEqual([row["document_id"] for row in rows], ["doc_a", "doc_b"])
 
     def test_legacy_prediction_without_document_id_still_rejects_unknown_blocks(self):
         blocks = [{"block_id": "a0", "kind": "paragraph", "text": "正文", "metadata": {}}]

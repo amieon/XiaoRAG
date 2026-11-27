@@ -249,7 +249,17 @@ class OpenAICompatibleHeadingClassifier:
                     format_recovery = "whitelist_fields_from_invalid_json"
                 if not isinstance(rows, list):
                     raise ValueError("Model JSON must contain a predictions array")
-                validated = [_validated_prediction(row, expected_ids) for row in rows]
+                known_rows = []
+                extra_block_ids = []
+                for row in rows:
+                    block_id = row.get("block_id") if isinstance(row, dict) else None
+                    if isinstance(block_id, str) and block_id not in expected_ids:
+                        extra_block_ids.append(block_id)
+                    else:
+                        known_rows.append(row)
+                # 一个真实块都没回答时，保留原有未知 ID 错误，不能用“丢弃额外项”掩盖缺失。
+                rows_to_validate = rows if not known_rows and extra_block_ids else known_rows
+                validated = [_validated_prediction(row, expected_ids) for row in rows_to_validate]
                 if format_recovery:
                     for row in validated:
                         row["format_recovery"] = format_recovery
@@ -288,6 +298,15 @@ class OpenAICompatibleHeadingClassifier:
                     missing = sorted(expected_ids - set(ids))
                     raise ValueError(
                         f"Model must return every input block exactly once; missing={missing[:3]}"
+                    )
+                if extra_block_ids:
+                    discarded = sorted(set(extra_block_ids))
+                    for row in validated:
+                        row["discarded_extra_block_ids"] = discarded
+                    print(
+                        f"[heading] discarded model-invented extra block IDs after "
+                        f"required coverage passed: {discarded}",
+                        file=sys.stderr, flush=True,
                     )
                 by_id = {row["block_id"]: row for row in validated}
                 return [
