@@ -18,6 +18,7 @@ src/chapter_tree/
   heading_classifier.py   # heading/body 数据链、Transformer 微调与推理
   native_classifier.py    # 完全信任 DOCX 原生标题证据的无模型模式
   zero_shot_classifier.py # OpenAI 兼容零样本标题判别，原生标题优先且无需微调
+  local_hf_classifier.py  # Transformers 直读 models/ 下 HF 原始或量化模型目录
   heading_hierarchy.py    # none／streaming／streaming-context／global 父子关系恢复
   tree.py                 # 原生／上游标题与显式编号构建确定性章节树
   groups.py               # 章节树转两层父子分块可消费的 flat groups
@@ -87,6 +88,8 @@ py -m venv .venv
 `--prepare-only` 不加载任何模型。它仍会生成页图、原生对象、页包和 DocumentIR。纯文本、JSON、DOCX、PPTX、XLSX 等可保留原生正文；只有视觉页骨架时还没有可构建的正文块。
 
 TXT/CSV/Markdown 等纯文本按 BOM、UTF-8、GB18030 顺序严格解码，并在 `native/objects.json` 的 `encoding` 记录实际编码；未知编码仍明确失败，不使用替换字符制造乱码。旧 Office（`.doc/.ppt/.pps/.xls`）不是由 Python 库直接读取二进制正文，而是通过 LibreOffice 转 PDF，再抽取文字层并保留页图；`.pps` 是老 PowerPoint 放映格式。LibreOffice 控制台输出按原始字节捕获，再按本地编码、UTF-8、GB18030 解码，避免中文 Windows 的转换日志导致 `UnicodeDecodeError`。
+
+轻量 OCR worker 的 stdin／stdout JSON Lines 协议固定为 UTF-8，父进程以二进制管道读取。Paddle 或原生库绕过 Python 日志重定向、直接写入 stdout 的 GBK／GB18030 中文日志会作为诊断信息解码并跳过，不再触发 `UnicodeDecodeError`；含中文 OCR 正文的响应仍必须是严格 UTF-8 JSON，非法协议立即报错而不是等到超时。编码回退和替换字符只用于外部命令诊断日志，不用于知识正文。
 
 ## 完整识别并生成知识单元
 
@@ -173,6 +176,40 @@ API 密钥只能放当前终端或权限受限的本地 `.env`，不得写入命
 默认每次请求设置 `max_tokens=4096`。思考模型若只返回 `reasoning_content` 而 `content` 为空，可提高 `--max-tokens 8192`，并在 Qwen 兼容服务上使用 `--disable-thinking`。对于忽略关闭思考开关的服务，程序会尝试读取 `reasoning_content`，但其中必须是合法预测 JSON，并继续通过块覆盖、短 ID 和层级校验；普通推理文字不会被接受。服务不支持 JSON 模式时使用 `--without-response-format`；若服务拒绝思考扩展字段，则去掉 `--disable-thinking`，不要混用失败实验的输出目录。
 
 上游 `raw_label` 可以辅助预标注，但若直接把它当全部真值，模型最多学习复现上游判断；要纠正标题误判，仍需人工复核和独立测试文档。
+
+### 直接使用 models/ 下的 HF 量化模型
+
+`--local-model` 由 Transformers 直接加载 Hugging Face 本地模型目录，不需要 Ollama、vLLM、API 地址或密钥。目录必须包含 `config.json` 和相应 Tokenizer／权重；加载固定使用 `local_files_only=True`，不会静默联网换模型。原始与 AWQ／GPTQ 等量化模型均走这一入口，具体量化运行时由模型配置和依赖决定，代码不绑定模型名或参数量。
+
+以 AWQ 模型为例，在项目根目录下载：
+
+```powershell
+py -m pip install -U huggingface_hub
+hf download Qwen/Qwen2.5-3B-Instruct-AWQ --local-dir "models\Qwen2.5-3B-Instruct-AWQ"
+```
+
+复用与 OCR 一致的 PyTorch CUDA 环境，并安装本地推理依赖：
+
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements-local-heading.txt
+.venv\Scripts\python.exe -m pip install autoawq
+```
+
+AutoAWQ 与 PyTorch／Transformers 存在版本耦合，安装器若试图大幅降级现有环境，应先停止并另建隔离环境，不要破坏已经可用的 OCR 环境。AWQ 的 Transformers 官方加载方式也是 `AutoModelForCausalLM.from_pretrained(..., device_map="auto")`，量化方法记录在模型 `config.json` 中。
+
+随后直接运行，不需要设置 `HEADING_MODEL_BASE_URL` 或 `HEADING_MODEL_NAME`：
+
+```powershell
+.venv\Scripts\python.exe scripts\build_docx_heading_dataset.py --input "datasets\raw-docx" --output "datasets\hf-awq-global-exp01" --local-model "models\Qwen2.5-3B-Instruct-AWQ" --hierarchy-mode global --batch-size 8
+```
+
+独立标题分类也支持同一目录：
+
+```powershell
+.venv\Scripts\python.exe scripts\classify_headings.py --input var\parsed --mode zero-shot --local-model "models\Qwen2.5-3B-Instruct-AWQ" --output var\heading-hf-local-exp01.jsonl
+```
+
+本地 Transformers 模式不把 `response_format` 伪装成服务端 JSON grammar 约束；它仍通过提示词、JSON 解析、短 ID、完整覆盖和父节点 schema 校验失败关闭。伪模型单元测试只验证本地加载调用与数据流，真实 AWQ 内核安装、显存占用和输出质量必须在本机另做冒烟与对照实验。
 
 ## 无 OCR 的 DOCX 标题数据集生成
 
@@ -512,7 +549,7 @@ ZIP/TAR 使用 `archive_security.py` 中的单一公开入口 `iter_archive_docu
 
 ## 验证状态与当前边界
 
-- 当前全量回归为 148 项测试及 16 个子测试通过，覆盖四种层级模式、无模型纯原生 baseline、活动路径与上下文开关、原生／编号锚点优先、非法父节点拒绝、`none` 下游一致平铺、零样本标题输入输出校验、DOCX 原生段落映射与样式回写、知识单元、章节树、CDC 与自然边界、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序、两路索引查询和版本发布／向量复用。
+- 当前全量回归为 154 项测试及 16 个子测试通过，覆盖中文 Windows GBK／GB18030 外部日志、OCR UTF-8 JSON 协议与中文响应、四种层级模式、无模型纯原生 baseline、HF 本地量化模型加载与层级复用、活动路径与上下文开关、原生／编号锚点优先、非法父节点拒绝、`none` 下游一致平铺、零样本标题输入输出校验、DOCX 原生段落映射与样式回写、知识单元、章节树、CDC 与自然边界、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序、两路索引查询和版本发布／向量复用。
 - CDC 冒烟样例将 80 个短句切成 14 个 child；只在开头编号增加一个字符后，第一个 child 改变，后续 13 个 child 正文完全不变。对应版本发布只编码 1 个新 child，其余 13 个 `vector_ref` 完全复用。该样例验证局部稳定性与数据流，不代表所有文档都只会改变一个块。
 - 已用显式小型向量完成索引构建、BM25 独立查询及版本发布 CLI 冒烟，并用真实 Milvus Lite 文件库完成 FLAT+COSINE 建库、加载和 Top-K 查询；这些结果只验证算法和存储数据流。真实 `sentence-transformers` 模型尚未在本次环境中完成加载、检索精度或批量性能验证。
 - 已用真实 TXT 输入完成 `run_parser.py --build-knowledge-units` 端到端样例，并完成 1 轮预热、2 轮正式计时的基准冒烟验证。

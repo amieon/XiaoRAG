@@ -85,6 +85,10 @@ def main():
     import numpy as np
 
     protocol = sys.stdout
+    # Windows 默认控制台编码可能是 GBK；JSON Lines 协议必须始终是 UTF-8。
+    # 原生库仍可能绕过此文本包装器写 fd 1，父进程会把这类非 JSON 字节当诊断日志。
+    protocol.reconfigure(encoding="utf-8", errors="strict", newline="\n")
+    sys.stdin.reconfigure(encoding="utf-8", errors="strict")
     # 模型库可能直接 print；协议消息只能走原 stdout，其余日志统一转 stderr。
     with contextlib.redirect_stdout(sys.stderr):
         started = time.perf_counter()

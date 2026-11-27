@@ -23,6 +23,7 @@ if str(SRC) not in sys.path:
 from chapter_tree.heading_classifier import (
     TransformerHeadingClassifier, load_heading_examples,
 )
+from chapter_tree.local_hf_classifier import LocalHFHeadingClassifier
 from chapter_tree.native_classifier import NativeHeadingClassifier
 from chapter_tree.zero_shot_classifier import OpenAICompatibleHeadingClassifier
 
@@ -31,8 +32,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Predict binary heading/body labels")
     parser.add_argument("--input", required=True, help="page_result.json or a directory containing them")
     parser.add_argument("--mode", choices=("native", "transformer", "zero-shot"), default="native")
-    parser.add_argument("--model", help="transformer 的模型目录，或 zero-shot 的模型名；也可用 HEADING_MODEL_NAME")
-    parser.add_argument("--base-url", help="zero-shot 的 OpenAI 兼容 /v1 地址；也可用 HEADING_MODEL_BASE_URL")
+    parser.add_argument("--model", help="transformer 的模型目录，或远程 zero-shot 的模型名；也可用 HEADING_MODEL_NAME")
+    parser.add_argument("--local-model", help="zero-shot 的 HF 本地模型目录，直接由 Transformers 加载")
+    parser.add_argument("--base-url", help="远程 zero-shot 的 OpenAI 兼容 /v1 地址；也可用 HEADING_MODEL_BASE_URL")
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--disable-thinking", action="store_true")
@@ -44,20 +46,31 @@ def main() -> None:
     args = parser.parse_args()
 
     output = Path(args.output)
+    if args.local_model and args.mode != "zero-shot":
+        raise ValueError("--local-model 只用于 --mode zero-shot")
     if output.exists():
         raise ValueError("Prediction output already exists; use a new file")
     examples = load_heading_examples(args.input)
     if args.mode == "native":
         classifier = NativeHeadingClassifier()
     elif args.mode == "zero-shot":
-        classifier = OpenAICompatibleHeadingClassifier(
-            base_url=args.base_url or os.environ.get("HEADING_MODEL_BASE_URL", ""),
-            model=args.model or os.environ.get("HEADING_MODEL_NAME", ""),
-            timeout=args.timeout,
-            max_tokens=args.max_tokens,
-            disable_thinking=args.disable_thinking,
-            use_response_format=not args.without_response_format,
-        )
+        if args.local_model:
+            classifier = LocalHFHeadingClassifier(
+                args.local_model,
+                device=args.device,
+                max_tokens=args.max_tokens,
+                disable_thinking=args.disable_thinking,
+                use_response_format=not args.without_response_format,
+            )
+        else:
+            classifier = OpenAICompatibleHeadingClassifier(
+                base_url=args.base_url or os.environ.get("HEADING_MODEL_BASE_URL", ""),
+                model=args.model or os.environ.get("HEADING_MODEL_NAME", ""),
+                timeout=args.timeout,
+                max_tokens=args.max_tokens,
+                disable_thinking=args.disable_thinking,
+                use_response_format=not args.without_response_format,
+            )
     else:
         if not args.model:
             raise ValueError("--model is required in transformer mode")

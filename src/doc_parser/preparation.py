@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import locale
 import mimetypes
 import os
 from pathlib import Path
@@ -14,6 +13,7 @@ import tempfile
 import zipfile
 
 from .archive_security import iter_archive_documents_safely
+from .process_output import decode_process_output
 
 
 SCHEMA_VERSION = "page-package.v1"
@@ -325,16 +325,8 @@ def _attach_docx_native_structure(native_blocks: list[dict], native: dict) -> li
 
 
 def _decode_process_output(value: bytes | str | None) -> str:
-    """LibreOffice 在中文 Windows 上可能输出 GBK；诊断日志不能使转换任务崩溃。"""
-    if value is None or isinstance(value, str):
-        return value or ""
-    encodings = list(dict.fromkeys([locale.getpreferredencoding(False), "utf-8", "gb18030"]))
-    for encoding in encodings:
-        try:
-            return value.decode(encoding)
-        except (UnicodeDecodeError, LookupError):
-            continue
-    return value.decode("utf-8", errors="replace")
+    """保留原有内部入口；替换字符只允许出现在诊断日志中。"""
+    return decode_process_output(value)
 
 
 def _render_office(source: Path, staging: Path, converter: str | None) -> Path:

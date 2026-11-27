@@ -17,6 +17,7 @@ from .pipeline import (
     PageParseResult,
     public_result_dict,
 )
+from .process_output import decode_process_output
 
 
 def _set_model_environment(root: Path) -> None:
@@ -25,24 +26,40 @@ def _set_model_environment(root: Path) -> None:
     os.environ.setdefault("HF_HOME", str(root / ".cache" / "huggingface-paddleocr"))
 
 
+def _print_worker_log(line: bytes | str) -> None:
+    # 原生库可能绕过 redirect_stdout，直接往 fd 1 写中文 Windows 本地编码日志。
+    # 只有诊断显示允许替换未知字节；JSON 协议和知识正文始终严格使用 UTF-8。
+    print("[OCR worker] " + decode_process_output(line).rstrip(), file=sys.stderr, flush=True)
+
+
 def _read_response(stream: Any, timeout: float) -> dict:
     responses: queue.Queue = queue.Queue(maxsize=1)
 
     def read() -> None:
         try:
             while True:
-                line = stream.readline()
-                if not line:
+                raw_line = stream.readline()
+                if not raw_line:
                     raise RuntimeError("PaddleOCR worker closed stdout; check worker logs")
+                try:
+                    line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+                except UnicodeDecodeError as exc:
+                    if raw_line.lstrip().startswith(b"{"):
+                        raise RuntimeError(
+                            "OCR worker JSON protocol is not valid UTF-8; "
+                            "check PYTHONIOENCODING and the worker stdout configuration"
+                        ) from exc
+                    _print_worker_log(raw_line)
+                    continue
                 try:
                     payload = json.loads(line)
                 except json.JSONDecodeError:
-                    print("[OCR worker] " + line.rstrip(), file=sys.stderr, flush=True)
+                    _print_worker_log(line)
                     continue
                 if isinstance(payload, dict) and {"event", "outputs", "error"}.intersection(payload):
                     responses.put(payload)
                     return
-                print("[OCR worker] " + line.rstrip(), file=sys.stderr, flush=True)
+                _print_worker_log(line)
         except Exception as exc:
             responses.put(exc)
 
@@ -101,10 +118,9 @@ class PaddleModelBackend:
                 cwd=self.root,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                bufsize=1,
-                env=dict(os.environ, PYTHONUNBUFFERED="1"),
+                # stdout 是二进制协议流：不能把混入的本地编码日志交给 UTF-8 文本包装器。
+                bufsize=0,
+                env=dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8"),
             )
             ready = _read_response(
                 self.worker.stdout,
@@ -157,7 +173,7 @@ class PaddleModelBackend:
                 paths.append(str(path))
             if self.worker is None or self.worker.poll() is not None:
                 raise RuntimeError("PaddleOCR worker is not running")
-            self.worker.stdin.write(json.dumps({"images": paths}) + "\n")
+            self.worker.stdin.write((json.dumps({"images": paths}) + "\n").encode("utf-8"))
             self.worker.stdin.flush()
             response = _read_response(
                 self.worker.stdout,
@@ -175,7 +191,7 @@ class PaddleModelBackend:
         if worker is not None:
             if worker.poll() is None:
                 try:
-                    worker.stdin.write('{"stop":true}\n')
+                    worker.stdin.write(b'{"stop":true}\n')
                     worker.stdin.flush()
                     worker.wait(timeout=10)
                 except (BrokenPipeError, OSError, subprocess.TimeoutExpired):

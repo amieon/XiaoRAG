@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from chapter_tree.groups import chapter_groups_document
 from chapter_tree.heading_hierarchy import HIERARCHY_MODES, HeadingHierarchyResolver
+from chapter_tree.local_hf_classifier import LocalHFHeadingClassifier
 from chapter_tree.native_classifier import NativeHeadingClassifier
 from chapter_tree.tree import ChapterTreeConfig, build_chapter_tree_from_ir
 from chapter_tree.zero_shot_classifier import OpenAICompatibleHeadingClassifier
@@ -152,8 +153,13 @@ def main() -> None:
         "--native-only", action="store_true",
         help="纯原生 baseline：只信 Heading／OOXML 大纲，不调用模型，也不用编号补标题",
     )
+    parser.add_argument(
+        "--local-model", type=Path,
+        help="HF 本地模型目录（含 config.json）；Transformers 直接加载，无需 Ollama／vLLM",
+    )
+    parser.add_argument("--device", default="auto", help="本地模型 device_map，默认 auto；CPU 可设 cpu")
     parser.add_argument("--base-url", help="OpenAI 兼容 /v1 地址；也可用 HEADING_MODEL_BASE_URL")
-    parser.add_argument("--model", help="模型名；也可用 HEADING_MODEL_NAME")
+    parser.add_argument("--model", help="远程模型名；也可用 HEADING_MODEL_NAME")
     parser.add_argument("--batch-size", type=int, default=8, help="每次请求判别的段落数")
     parser.add_argument(
         "--hierarchy-mode", choices=HIERARCHY_MODES, default="streaming",
@@ -164,14 +170,27 @@ def main() -> None:
     parser.add_argument("--disable-thinking", action="store_true", help="Qwen 兼容服务显式关闭思考")
     parser.add_argument("--without-response-format", action="store_true", help="服务不支持 response_format 时关闭 JSON 模式")
     args = parser.parse_args()
-    classifier = None if args.native_only else OpenAICompatibleHeadingClassifier(
-        base_url=args.base_url or os.environ.get("HEADING_MODEL_BASE_URL", ""),
-        model=args.model or os.environ.get("HEADING_MODEL_NAME", ""),
-        timeout=args.timeout,
-        max_tokens=args.max_tokens,
-        disable_thinking=args.disable_thinking,
-        use_response_format=not args.without_response_format,
-    )
+    if args.native_only and args.local_model:
+        parser.error("--native-only 与 --local-model 不能同时使用")
+    if args.local_model:
+        classifier = LocalHFHeadingClassifier(
+            args.local_model,
+            device=args.device,
+            max_tokens=args.max_tokens,
+            disable_thinking=args.disable_thinking,
+            use_response_format=not args.without_response_format,
+        )
+    elif args.native_only:
+        classifier = None
+    else:
+        classifier = OpenAICompatibleHeadingClassifier(
+            base_url=args.base_url or os.environ.get("HEADING_MODEL_BASE_URL", ""),
+            model=args.model or os.environ.get("HEADING_MODEL_NAME", ""),
+            timeout=args.timeout,
+            max_tokens=args.max_tokens,
+            disable_thinking=args.disable_thinking,
+            use_response_format=not args.without_response_format,
+        )
     result = build_docx_heading_dataset(
         args.input, args.output, classifier=classifier, batch_size=args.batch_size,
         hierarchy_mode=args.hierarchy_mode, native_only=args.native_only,
