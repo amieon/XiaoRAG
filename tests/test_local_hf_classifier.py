@@ -12,7 +12,9 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from chapter_tree.heading_classifier import HeadingExample
 from chapter_tree.heading_hierarchy import HeadingHierarchyResolver
-from chapter_tree.local_hf_classifier import LocalHFHeadingClassifier
+from chapter_tree.local_hf_classifier import (
+    LocalHFHeadingClassifier, _constrained_candidates, _prefix_allowed_tokens,
+)
 
 
 class FakeInputs(dict):
@@ -33,10 +35,12 @@ class FakeTokenizer:
         self.payload = {"messages": messages}
         return "rendered-chat-prompt"
 
-    def __call__(self, texts, return_tensors):
-        assert texts == ["rendered-chat-prompt"]
-        assert return_tensors == "pt"
-        return FakeInputs(input_ids=[[10, 11, 12]])
+    def __call__(self, texts, return_tensors=None, add_special_tokens=True):
+        if return_tensors == "pt":
+            assert texts == ["rendered-chat-prompt"]
+            return FakeInputs(input_ids=[[10, 11, 12]])
+        assert not add_special_tokens
+        return {"input_ids": [20, 21]}
 
     def decode(self, tokens, skip_special_tokens):
         assert list(tokens) == [20, 21]
@@ -115,7 +119,8 @@ class LocalHFClassifierTests(unittest.TestCase):
             })])
             self.assertEqual(tokenizer_calls, [(str(model_path), {"local_files_only": True})])
             self.assertFalse(model.generate_options[0]["do_sample"])
-            self.assertEqual(model.generate_options[0]["max_new_tokens"], 4096)
+            self.assertEqual(model.generate_options[0]["max_new_tokens"], 3)
+            self.assertTrue(callable(model.generate_options[0]["prefix_allowed_tokens_fn"]))
             self.assertEqual(classifier.tokenizer.template_options[0]["enable_thinking"], False)
 
             items = [example(0, "总论"), example(1, "子节")]
@@ -123,6 +128,35 @@ class LocalHFClassifierTests(unittest.TestCase):
             resolved = HeadingHierarchyResolver(classifier, mode="streaming").resolve(items, predictions)
             self.assertEqual([row["heading_level"] for row in resolved], [1, 1])
             self.assertEqual(resolved[1]["hierarchy_source"], "streaming_model")
+
+    def test_candidate_sets_and_token_prefixes_only_allow_complete_legal_outputs(self):
+        classification = _constrained_candidates({"messages": [
+            {"role": "system", "content": ""},
+            {"role": "user", "content": json.dumps({"blocks": [{"block_id": "b0"}]})},
+        ]})
+        self.assertEqual(len(classification), 7)
+        decoded = [json.loads(item)["predictions"][0] for item in classification]
+        self.assertEqual({item["label"] for item in decoded}, {"body", "heading"})
+        self.assertEqual({item["heading_level"] for item in decoded}, {None, 1, 2, 3, 4, 5, 6})
+
+        hierarchy = _constrained_candidates({"messages": [
+            {"role": "system", "content": ""},
+            {"role": "user", "content": json.dumps({
+                "current": {"text": "子节"},
+                "active_path": [{"heading_id": "root"}, {"heading_id": "h000"}],
+            })},
+        ]})
+        self.assertEqual([json.loads(item)["parent_id"] for item in hierarchy], ["root", "h000"])
+
+        class Tokens(list):
+            def tolist(self):
+                return list(self)
+
+        allowed = _prefix_allowed_tokens([(1, 2), (1, 3), (4,)], 1, 9)
+        self.assertEqual(allowed(0, Tokens([99])), [1, 4])
+        self.assertEqual(allowed(0, Tokens([99, 1])), [2, 3])
+        self.assertEqual(allowed(0, Tokens([99, 1, 2])), [9])
+        self.assertEqual(allowed(0, Tokens([99, 4])), [9])
 
     def test_explicit_cuda_fails_immediately_when_torch_has_no_cuda(self):
         class UnavailableCuda:

@@ -219,7 +219,9 @@ AutoAWQ 与 PyTorch／Transformers 存在版本耦合，安装器若试图大幅
 .venv\Scripts\python.exe scripts\classify_headings.py --input var\parsed --mode zero-shot --local-model "models\Qwen2.5-3B-Instruct-AWQ" --output var\heading-hf-local-exp01.jsonl
 ```
 
-本地 Transformers 模式不把 `response_format` 伪装成服务端 JSON grammar 约束；它仍通过提示词、JSON 解析、短 ID、完整覆盖和父节点 schema 校验失败关闭。`device_map="auto"` 可能选择 CPU，因此加载后会打印 `[local-hf] READY ... actual_device=...`；CPU 会另发慢速警告。每次生成均打印序号、实际设备、输入 token 上限、完成 token 数和耗时，不再只有失败日志。显式 `--device cuda:0` 时若 `torch.cuda.is_available()` 为 false 会立即失败，不会静默退回 CPU；CUDA PyTorch 建议放在独立标题环境，避免破坏已验证的 PaddleOCR 环境。伪模型单元测试只验证本地加载调用与数据流，真实 AWQ 内核安装、显存占用和输出质量必须在本机另做冒烟与对照实验。
+本地 Transformers 模式不把 `response_format` 伪装成服务端 JSON grammar 约束，而是对单块分类和 `streaming/streaming-context` 层级恢复使用 token 前缀候选约束：分类只允许一个 `body` 结果或六个 `heading`＋1～6 级结果；层级只允许输出当前 `active_path` 中某个完整 `parent_id` JSON。多块输入在程序侧拆成单块，模型不能创造块 ID、额外字段、非法父节点或畸形 JSON。`global` 因输出是完整变长序列，仍走自由生成＋严格校验。约束只保证结构和引用合法，不保证标题／父子关系的语义判断正确，仍需抽查。
+
+`device_map="auto"` 可能选择 CPU，因此加载后会打印 `[local-hf] READY ... actual_device=...`；CPU 会另发慢速警告。每次生成均打印序号、实际设备、输入 token 上限、完成 token 数、耗时和 `constrained_candidates` 候选数。显式 `--device cuda:0` 时若 `torch.cuda.is_available()` 为 false 会立即失败，不会静默退回 CPU；CUDA PyTorch 建议放在独立标题环境，避免破坏已验证的 PaddleOCR 环境。伪模型单元测试只验证本地加载调用、候选集合与 token 前缀约束，真实模型语义质量必须在本机另做对照实验。
 
 ### OCR 结果：同一 Qwen 完成标题识别与层级恢复
 
@@ -579,7 +581,7 @@ ZIP/TAR 使用 `archive_security.py` 中的单一公开入口 `iter_archive_docu
 
 ## 验证状态与当前边界
 
-- 当前全量回归为 170 项测试及 18 个子测试通过，覆盖中文 Windows GBK／GB18030 外部日志、OCR UTF-8 JSON 协议与中文响应、同一 Qwen 两阶段标题识别与层级恢复、批量预测的文档隔离、按文档检查点与续跑跳过、四种层级模式、无模型纯原生 baseline、HF 本地量化模型加载与层级复用、本地生成设备与逐次耗时日志、CUDA 请求失败关闭、活动路径与上下文开关、流式当前标题编号隔离、自父节点拒绝、原生／编号锚点优先、模型标签别名与正文冗余层级审计、单块非法 JSON 白名单字段受限恢复及歧义拒绝、重复预测一致折叠与冲突拒绝、虚构额外 ID 丢弃及真实缺块拒绝、无占位输出的分类／层级纠正重试、原始错误响应诊断、不完整批次自动拆分及单块持续非法失败、`none` 下游一致平铺、零样本标题输入输出校验、DOCX 原生段落映射与样式回写、知识单元、章节树、CDC 与自然边界、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序、两路索引查询和版本发布／向量复用。
+- 当前全量回归为 171 项测试及 18 个子测试通过，覆盖中文 Windows GBK／GB18030 外部日志、OCR UTF-8 JSON 协议与中文响应、同一 Qwen 两阶段标题识别与层级恢复、本地单块分类七候选与 streaming 父节点 token 前缀约束、批量预测的文档隔离、按文档检查点与续跑跳过、四种层级模式、无模型纯原生 baseline、HF 本地量化模型加载与层级复用、本地生成设备与逐次耗时日志、CUDA 请求失败关闭、活动路径与上下文开关、流式当前标题编号隔离、自父节点拒绝、原生／编号锚点优先、模型标签别名与正文冗余层级审计、单块非法 JSON 白名单字段受限恢复及歧义拒绝、重复预测一致折叠与冲突拒绝、虚构额外 ID 丢弃及真实缺块拒绝、无占位输出的分类／层级纠正重试、原始错误响应诊断、不完整批次自动拆分及单块持续非法失败、`none` 下游一致平铺、零样本标题输入输出校验、DOCX 原生段落映射与样式回写、知识单元、章节树、CDC 与自然边界、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序、两路索引查询和版本发布／向量复用。
 - CDC 冒烟样例将 80 个短句切成 14 个 child；只在开头编号增加一个字符后，第一个 child 改变，后续 13 个 child 正文完全不变。对应版本发布只编码 1 个新 child，其余 13 个 `vector_ref` 完全复用。该样例验证局部稳定性与数据流，不代表所有文档都只会改变一个块。
 - 已用显式小型向量完成索引构建、BM25 独立查询及版本发布 CLI 冒烟，并用真实 Milvus Lite 文件库完成 FLAT+COSINE 建库、加载和 Top-K 查询；这些结果只验证算法和存储数据流。真实 `sentence-transformers` 模型尚未在本次环境中完成加载、检索精度或批量性能验证。
 - 已用真实 TXT 输入完成 `run_parser.py --build-knowledge-units` 端到端样例，并完成 1 轮预热、2 轮正式计时的基准冒烟验证。

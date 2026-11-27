@@ -5,12 +5,66 @@
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 import time
 from typing import Any, Callable
 
 from .zero_shot_classifier import OpenAICompatibleHeadingClassifier
+
+
+def _compact_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _constrained_candidates(payload: dict[str, Any]) -> list[str]:
+    try:
+        user = json.loads(payload["messages"][1]["content"])
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+        return []
+    blocks = user.get("blocks") if isinstance(user, dict) else None
+    if isinstance(blocks, list) and len(blocks) == 1:
+        block_id = blocks[0].get("block_id")
+        if isinstance(block_id, str):
+            return [
+                _compact_json({"predictions": [{
+                    "block_id": block_id, "label": "body", "heading_level": None,
+                }]}),
+                *[
+                    _compact_json({"predictions": [{
+                        "block_id": block_id, "label": "heading", "heading_level": level,
+                    }]})
+                    for level in range(1, 7)
+                ],
+            ]
+    active_path = user.get("active_path") if isinstance(user, dict) else None
+    if isinstance(active_path, list):
+        parent_ids = []
+        for item in active_path:
+            if isinstance(item, dict) and isinstance(item.get("heading_id"), str):
+                parent_ids.append(item["heading_id"])
+        if parent_ids and len(parent_ids) == len(set(parent_ids)):
+            return [_compact_json({"parent_id": parent_id}) for parent_id in parent_ids]
+    return []
+
+
+def _prefix_allowed_tokens(
+    sequences: list[tuple[int, ...]], prompt_length: int, eos_token_id: int,
+) -> Callable[[int, Any], list[int]]:
+    def allowed(batch_id: int, input_ids: Any) -> list[int]:
+        generated_prefix = input_ids[prompt_length:]
+        values = generated_prefix.tolist() if hasattr(generated_prefix, "tolist") else generated_prefix
+        prefix = tuple(values)
+        next_tokens = set()
+        for sequence in sequences:
+            if len(prefix) < len(sequence) and sequence[:len(prefix)] == prefix:
+                next_tokens.add(sequence[len(prefix)])
+            elif prefix == sequence:
+                next_tokens.add(eos_token_id)
+        # 正常不会发生；保留 EOS 让生成失败为空并由现有 JSON 校验拒绝。
+        return sorted(next_tokens) or [eos_token_id]
+    return allowed
 
 
 class LocalHFHeadingClassifier(OpenAICompatibleHeadingClassifier):
@@ -91,6 +145,15 @@ class LocalHFHeadingClassifier(OpenAICompatibleHeadingClassifier):
                 file=sys.stderr, flush=True,
             )
 
+    def _predict_batch(self, examples):
+        # 本地候选约束按单块定义；多块在程序侧拆开，不让模型自行发明块 ID。
+        if len(examples) > 1:
+            predictions = []
+            for example in examples:
+                predictions.extend(super()._predict_batch([example]))
+            return predictions
+        return super()._predict_batch(examples)
+
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         template_options: dict[str, Any] = {
             "tokenize": False,
@@ -102,21 +165,40 @@ class LocalHFHeadingClassifier(OpenAICompatibleHeadingClassifier):
         inputs = self.tokenizer([text], return_tensors="pt").to(self.hf_model.device)
         input_length = len(inputs["input_ids"][0])
         max_tokens = int(payload["max_tokens"])
+        candidates = _constrained_candidates(payload)
+        generation_options: dict[str, Any] = {
+            **inputs,
+            "max_new_tokens": max_tokens,
+            "do_sample": False,
+            "pad_token_id": self.tokenizer.eos_token_id,
+        }
+        if candidates:
+            token_sequences = []
+            for candidate in candidates:
+                encoded = self.tokenizer(candidate, add_special_tokens=False)["input_ids"]
+                if encoded and isinstance(encoded[0], list):
+                    encoded = encoded[0]
+                if not encoded:
+                    raise RuntimeError("Tokenizer produced an empty constrained candidate")
+                token_sequences.append(tuple(int(token) for token in encoded))
+            generation_options["prefix_allowed_tokens_fn"] = _prefix_allowed_tokens(
+                token_sequences, input_length, self.tokenizer.eos_token_id,
+            )
+            generation_options["max_new_tokens"] = min(
+                max_tokens, max(map(len, token_sequences)) + 1,
+            )
         self.generation_count += 1
         generation_id = self.generation_count
         started = time.perf_counter()
         print(
             f"[local-hf] generation {generation_id} started: "
-            f"device={self.hf_model.device}, input_tokens={input_length}, max_new_tokens={max_tokens}",
+            f"device={self.hf_model.device}, input_tokens={input_length}, "
+            f"max_new_tokens={generation_options['max_new_tokens']}, "
+            f"constrained_candidates={len(candidates)}",
             file=sys.stderr, flush=True,
         )
         with self.torch.inference_mode():
-            generated = self.hf_model.generate(
-                **inputs,
-                max_new_tokens=max_tokens,
-                do_sample=False,
-                pad_token_id=self.tokenizer.eos_token_id,
-            )
+            generated = self.hf_model.generate(**generation_options)
         new_tokens = generated[0][input_length:]
         elapsed = time.perf_counter() - started
         print(
@@ -128,7 +210,9 @@ class LocalHFHeadingClassifier(OpenAICompatibleHeadingClassifier):
         return {
             "choices": [{
                 "message": {"content": content},
-                "finish_reason": "length" if len(new_tokens) >= max_tokens else "stop",
+                "finish_reason": (
+                    "length" if len(new_tokens) >= generation_options["max_new_tokens"] else "stop"
+                ),
             }],
             "usage": {"completion_tokens": len(new_tokens)},
         }
