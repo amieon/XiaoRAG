@@ -210,14 +210,45 @@ class HeadingHierarchyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not in active path"):
             resolver.resolve(items[:2], [prediction(item) for item in items[:2]])
 
-        parents = iter(["root", "h000"])
+        parents = iter(["root"])
 
         def closed_parent(payload):
-            return json_response({"parent_id": next(parents)})
+            return json_response({"parent_id": next(parents, "h000")})
 
         resolver = HeadingHierarchyResolver(client_for(closed_parent), mode="streaming")
         with self.assertRaisesRegex(ValueError, "not in active path"):
             resolver.resolve(items, [prediction(item) for item in items])
+
+    def test_streaming_retries_an_invalid_example_id_with_explicit_candidates(self):
+        items = [example(index, text) for index, text in enumerate(["总论", "子节"])]
+        calls = []
+
+        def transport(payload):
+            calls.append(payload)
+            return json_response({"parent_id": "h003" if len(calls) == 1 else "h000"})
+
+        resolved = HeadingHierarchyResolver(client_for(transport), mode="streaming").resolve(
+            items, [prediction(item) for item in items],
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("h003", calls[0]["messages"][0]["content"])
+        correction = json.loads(calls[1]["messages"][-1]["content"])
+        self.assertEqual(correction["allowed_ids"], ["root", "h000"])
+        self.assertEqual(correction["current_heading_id"], "h001")
+        self.assertEqual(resolved[1]["hierarchy_parent_id"], items[0].block_id)
+
+    def test_streaming_persistent_invalid_parent_fails_with_current_block_and_candidates(self):
+        items = [example(index, text) for index, text in enumerate(["总论", "子节"])]
+        calls = []
+
+        def transport(payload):
+            calls.append(payload)
+            return json_response({"parent_id": "h003"})
+
+        resolver = HeadingHierarchyResolver(client_for(transport), mode="streaming", max_retries=1)
+        with self.assertRaisesRegex(ValueError, "doc_p0001_b0001.*allowed.*h000"):
+            resolver.resolve(items, [prediction(item) for item in items])
+        self.assertEqual(len(calls), 2)
 
     def test_none_dataset_and_downstream_cli_replay_stay_flat(self):
         with tempfile.TemporaryDirectory() as temporary:

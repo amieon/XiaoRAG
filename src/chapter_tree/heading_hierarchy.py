@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import sys
 from typing import Any, Sequence
 
 from .heading_classifier import HEADING_LABEL, HeadingExample
@@ -27,11 +28,16 @@ class _HeadingNode:
 
 
 class HeadingHierarchyResolver:
-    def __init__(self, client: Any, *, mode: str = "streaming") -> None:
+    def __init__(
+        self, client: Any, *, mode: str = "streaming", max_retries: int = 2,
+    ) -> None:
         if mode not in HIERARCHY_MODES:
             raise ValueError(f"Unknown hierarchy mode: {mode}")
+        if max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
         self.client = client
         self.mode = mode
+        self.max_retries = max_retries
 
     @staticmethod
     def _anchor_level(example: HeadingExample, row: dict[str, Any]) -> int | None:
@@ -138,19 +144,50 @@ parent_id只能是当前标题之前的heading_id，顶级标题为null。不得
         system = """你是文档章节树构建器。为当前标题从active_path中选择一个父节点。
 active_path按根到上一标题排列。若当前标题与路径末尾同级，选择末尾的父节点；
 若它是末尾的孩子，选择末尾；若开启更高层章节，选择相应祖先或root。
-只能输出一个已有父节点ID，不得创造节点或输出解释。
-只输出JSON：{"parent_id":"h003"}；顶级标题使用{"parent_id":"root"}。"""
-        response = self.client._post(self._payload(system, user))
-        decoded = _json_content(_content(response))
-        if not isinstance(decoded, dict) or "parent_id" not in decoded:
-            raise ValueError("Streaming hierarchy response requires parent_id")
-        parent_id = decoded["parent_id"]
-        if parent_id == "root":
-            return None
+parent_id必须逐字复制active_path中某项的heading_id，不得创造节点或输出解释。
+只输出JSON，例如{"parent_id":"root"}。不要照抄示例或其他标题的ID。"""
         valid = {node.local_id for node in stack}
-        if parent_id not in valid:
-            raise ValueError(f"Streaming parent is not in active path: {parent_id!r}")
-        return parent_id
+        allowed = ["root"] + [node.local_id for node in stack]
+        payload = self._payload(system, user)
+        messages = payload["messages"]
+        for attempt in range(self.max_retries + 1):
+            content = ""
+            try:
+                response = self.client._post({**payload, "messages": messages})
+                content = _content(response)
+                decoded = _json_content(content)
+                if not isinstance(decoded, dict) or "parent_id" not in decoded:
+                    raise ValueError("Streaming hierarchy response requires parent_id")
+                parent_id = decoded["parent_id"]
+                if parent_id == "root":
+                    return None
+                if parent_id not in valid:
+                    raise ValueError(f"Streaming parent is not in active path: {parent_id!r}")
+                return parent_id
+            except ValueError as exc:
+                detail = (
+                    f"current={local_id!r} ({example.text!r}), block_id={example.block_id!r}, "
+                    f"allowed={allowed!r}"
+                )
+                if attempt == self.max_retries:
+                    raise ValueError(f"{exc}; {detail}") from exc
+                print(
+                    f"[hierarchy] invalid response for {example.block_id}; "
+                    f"retry {attempt + 1}/{self.max_retries}: {exc}",
+                    file=sys.stderr, flush=True,
+                )
+                correction = json.dumps({
+                    "error": str(exc),
+                    "instruction": "重新回答同一个current标题。parent_id只能逐字复制allowed_ids之一。",
+                    "current_heading_id": local_id,
+                    "allowed_ids": allowed,
+                    "output": {"parent_id": "从allowed_ids中选择一个"},
+                }, ensure_ascii=False)
+                messages = messages + [
+                    {"role": "assistant", "content": content},
+                    {"role": "user", "content": correction},
+                ]
+        raise AssertionError("unreachable")
 
     def resolve(
         self,
