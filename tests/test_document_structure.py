@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 import classify_headings
-from chapter_tree.heading_classifier import HeadingExample
+from chapter_tree.heading_classifier import HeadingExample, load_heading_examples
 from chapter_tree.heading_hierarchy import predict_document_structure
 from chapter_tree.tree import build_chapter_tree
 
@@ -143,6 +143,39 @@ class DocumentStructureTests(unittest.TestCase):
 
         self.assertEqual(classifier.seen_documents, [{"doc_b"}])
         self.assertEqual([row["document_id"] for row in rows], ["doc_a", "doc_b"])
+
+    def test_native_only_json_ir_is_loaded_for_qwen_without_duplicating_ocr_pages(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            visual = root / "visual/results/pages/0001"
+            visual.mkdir(parents=True)
+            (visual / "page_result.json").write_text(json.dumps({
+                "page": {"page_id": "doc_visual_p0001", "blocks": [{
+                    "block_id": "visual_b0", "page_id": "doc_visual_p0001",
+                    "text": "OCR 正文", "block_type": "text", "reading_order": 0,
+                }]},
+                "routes": [],
+            }, ensure_ascii=False), encoding="utf-8")
+            native = root / "json/results"
+            native.mkdir(parents=True)
+            (native / "document.json").write_text(json.dumps({
+                "document_id": "doc_json",
+                "pages": [{
+                    "page_id": "doc_json_p0001", "page_no": 1,
+                    "metadata": {"native_only": True},
+                    "blocks": [{
+                        "block_id": "doc_json_p0001_b0000", "page_id": "doc_json_p0001",
+                        "text": '```json\n{"status":"success"}\n```',
+                        "block_type": "paragraph", "reading_order": 0, "metadata": {},
+                    }],
+                }],
+            }, ensure_ascii=False), encoding="utf-8")
+            rows = load_heading_examples(root)
+        self.assertEqual([row.block_id for row in rows], ["visual_b0", "doc_json_p0001_b0000"])
+        by_id = {row.block_id: row for row in rows}
+        self.assertEqual(by_id["doc_json_p0001_b0000"].document_id, "doc_json")
+        self.assertIn('"status":"success"', by_id["doc_json_p0001_b0000"].text)
+        self.assertTrue(by_id["doc_json_p0001_b0000"].source_page_result.endswith("#native_only"))
 
     def test_legacy_prediction_without_document_id_still_rejects_unknown_blocks(self):
         blocks = [{"block_id": "a0", "kind": "paragraph", "text": "正文", "metadata": {}}]

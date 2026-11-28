@@ -90,6 +90,24 @@ def _document_id(page_id: str) -> str:
     return match.group(1) if match else page_id
 
 
+def _native_only_document_paths(source: Path) -> list[Path]:
+    """Native text/JSON has real IR blocks but no visual page_result."""
+    if source.is_file():
+        return [source] if source.name == "document.json" else []
+    if not source.is_dir():
+        return []
+    result = []
+    for path in sorted(source.rglob("document.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            pages = payload.get("pages") or []
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if pages and all((page.get("metadata") or {}).get("native_only") is True for page in pages):
+            result.append(path)
+    return result
+
+
 def load_heading_examples(
     source: str | Path,
     labels: str | Path | None = None,
@@ -104,7 +122,11 @@ def load_heading_examples(
     examples: list[HeadingExample] = []
     used_labels: set[str] = set()
     seen_block_ids: set[str] = set()
-    for path in _page_result_paths(source_path):
+    page_result_paths = [] if source_path.is_file() and source_path.name == "document.json" else _page_result_paths(source_path)
+    native_document_paths = _native_only_document_paths(source_path)
+    if not page_result_paths and not native_document_paths:
+        raise ValueError(f"No page_result.json or native-only document.json found below: {source}")
+    for path in page_result_paths:
         payload = json.loads(path.read_text(encoding="utf-8"))
         page = payload.get("page") or {}
         page_id = str(page.get("page_id") or "")
@@ -147,6 +169,41 @@ def load_heading_examples(
                 label=label,
                 native_structures=[item for item in native_structures if isinstance(item, dict)],
             ))
+    for path in native_document_paths:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        document_id = str(payload["document_id"])
+        for page in sorted(payload.get("pages") or [], key=lambda item: item.get("page_no") or 0):
+            page_id = str(page.get("page_id") or "")
+            for position, block in enumerate(page.get("blocks") or []):
+                block_id = str(block.get("block_id") or "")
+                if not block_id:
+                    raise ValueError(f"{path}: native block without block_id")
+                if block_id in seen_block_ids:
+                    raise ValueError(f"Duplicate block_id across input documents: {block_id}")
+                seen_block_ids.add(block_id)
+                label = label_map.get(block_id)
+                if label_map and label is None:
+                    continue
+                if label is not None:
+                    used_labels.add(block_id)
+                metadata = block.get("metadata") or {}
+                native_structures = metadata.get("native_structures", metadata.get("native_structure", []))
+                if isinstance(native_structures, dict):
+                    native_structures = [native_structures]
+                if not isinstance(native_structures, list):
+                    native_structures = []
+                examples.append(HeadingExample(
+                    block_id=block_id,
+                    page_id=str(block.get("page_id") or page_id),
+                    document_id=document_id,
+                    text=str(block.get("text") or "").strip(),
+                    context=metadata.get("context") or {},
+                    raw_label=str(metadata.get("raw_label") or block.get("block_type") or ""),
+                    reading_order=int(block.get("reading_order", position)),
+                    source_page_result=f"{path}#native_only",
+                    label=label,
+                    native_structures=[item for item in native_structures if isinstance(item, dict)],
+                ))
     missing = sorted(set(label_map) - used_labels)
     if missing:
         preview = ", ".join(missing[:5])
