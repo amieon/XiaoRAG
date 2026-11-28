@@ -225,7 +225,7 @@ AutoAWQ 与 PyTorch／Transformers 存在版本耦合，安装器若试图大幅
 
 ### OCR 结果：同一 Qwen 完成标题识别与层级恢复
 
-对已有 `page_result.json` 批次增加 `--hierarchy-mode` 后，第一阶段由 Qwen 补充标题／正文判断，第二阶段仍使用同一模型实例，为缺少原生／明确编号锚点的标题选择 `parent_id`，程序统一计算最终层级。视觉页继续读取 `page_result.json`；TXT／JSON 等没有视觉页的 `native_only` 文档直接读取其 DocumentIR 原生文本块，不为伪造 OCR 中间产物，也不会与视觉页重复加载。PP-DocLayoutV3 的 `raw_label` 和前后文仍作为输入证据保留；该步骤不重新 OCR，也不覆盖 DocumentIR。
+对已有 `page_result.json` 批次增加 `--hierarchy-mode` 后，第一阶段由 Qwen 补充标题／正文判断，第二阶段仍使用同一模型实例，为缺少原生／明确编号锚点的标题选择 `parent_id`，程序统一计算最终层级。视觉页继续读取 `page_result.json`；TXT／JSON 等没有视觉页的 `native_only` 文档直接读取其 DocumentIR 原生文本块，不伪造 OCR 中间产物，也不会与视觉页重复加载。原生块超过 6000 Unicode 字符时使用 `newline_pack_v2`：优先保留完整换行，将连续行装入一个块，只有单行自身超限才硬切；所有块仍以连续字符区间无损覆盖原文，保留原块 ID、派生块 ID、阅读顺序和 `native_char_start/end`，不把数十万 token 的整份 JSON 一次性送入模型。该分段属于 parser 的原生文本生成阶段，与 OCR 页块生成同属 DocumentIR 构建，不要求额外命令。`classify_headings.py` 每次启动还会在读取续跑检查点前自动迁移旧版超长 IR：备份原 IR，并只移除受影响文档的陈旧预测；`scripts/reflow_native_ir.py` 仅是调用同一共享函数的备用独立入口，正常流程无需运行。PP-DocLayoutV3 的 `raw_label` 和前后文仍作为输入证据保留；该步骤不重新 OCR，也不覆盖原始输入文件。
 
 ```powershell
 .venv\Scripts\python.exe scripts\classify_headings.py --input "var\parsed-exp05" --mode zero-shot --local-model "models\Qwen3-0.6B" --hierarchy-mode streaming --disable-thinking --batch-size 8 --output "var\heading-qwen-streaming-exp01.jsonl"
@@ -589,7 +589,7 @@ ZIP/TAR 使用 `archive_security.py` 中的单一公开入口 `iter_archive_docu
 
 ## 验证状态与当前边界
 
-- 当前全量回归为 175 项测试及 18 个子测试通过，新增原生 JSON／文本 IR 与 OCR 页联合加载且不重复的 Qwen 输入回归、Python 批量切块失败继续／续跑、空标题／空正文来源覆盖与全空 group 回归；覆盖中文 Windows GBK／GB18030 外部日志、OCR UTF-8 JSON 协议与中文响应、同一 Qwen 两阶段标题识别与层级恢复、本地单块分类七候选与 streaming 父节点 token 前缀约束、批量预测的文档隔离、按文档检查点与续跑跳过、四种层级模式、无模型纯原生 baseline、HF 本地量化模型加载与层级复用、本地生成设备与逐次耗时日志、CUDA 请求失败关闭、活动路径与上下文开关、流式当前标题编号隔离、自父节点拒绝、原生／编号锚点优先、模型标签别名与正文冗余层级审计、单块非法 JSON 白名单字段受限恢复及歧义拒绝、重复预测一致折叠与冲突拒绝、虚构额外 ID 丢弃及真实缺块拒绝、无占位输出的分类／层级纠正重试、原始错误响应诊断、不完整批次自动拆分及单块持续非法失败、`none` 下游一致平铺、零样本标题输入输出校验、DOCX 原生段落映射与样式回写、知识单元、章节树、CDC 与自然边界、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序、两路索引查询和版本发布／向量复用。
+- 当前全量回归为 179 项测试及 18 个子测试通过，新增原生超长文本无损分段、现有 IR 与预测迁移备份、模型上下文超限生成前失败、原生 JSON／文本 IR 与 OCR 页联合加载且不重复的 Qwen 输入回归、Python 批量切块失败继续／续跑、空标题／空正文来源覆盖与全空 group 回归；覆盖中文 Windows GBK／GB18030 外部日志、OCR UTF-8 JSON 协议与中文响应、同一 Qwen 两阶段标题识别与层级恢复、本地单块分类七候选与 streaming 父节点 token 前缀约束、批量预测的文档隔离、按文档检查点与续跑跳过、四种层级模式、无模型纯原生 baseline、HF 本地量化模型加载与层级复用、本地生成设备与逐次耗时日志、CUDA 请求失败关闭、活动路径与上下文开关、流式当前标题编号隔离、自父节点拒绝、原生／编号锚点优先、模型标签别名与正文冗余层级审计、单块非法 JSON 白名单字段受限恢复及歧义拒绝、重复预测一致折叠与冲突拒绝、虚构额外 ID 丢弃及真实缺块拒绝、无占位输出的分类／层级纠正重试、原始错误响应诊断、不完整批次自动拆分及单块持续非法失败、`none` 下游一致平铺、零样本标题输入输出校验、DOCX 原生段落映射与样式回写、知识单元、章节树、CDC 与自然边界、两层父子块、双生产者统一适配器、压缩包安全、核心管线与并行边界，以及 BM25 分词／评分／序列化、稠密 Top-K 排序、两路索引查询和版本发布／向量复用。
 - CDC 冒烟样例将 80 个短句切成 14 个 child；只在开头编号增加一个字符后，第一个 child 改变，后续 13 个 child 正文完全不变。对应版本发布只编码 1 个新 child，其余 13 个 `vector_ref` 完全复用。该样例验证局部稳定性与数据流，不代表所有文档都只会改变一个块。
 - 已用显式小型向量完成索引构建、BM25 独立查询及版本发布 CLI 冒烟，并用真实 Milvus Lite 文件库完成 FLAT+COSINE 建库、加载和 Top-K 查询；这些结果只验证算法和存储数据流。真实 `sentence-transformers` 模型尚未在本次环境中完成加载、检索精度或批量性能验证。
 - 已用真实 TXT 输入完成 `run_parser.py --build-knowledge-units` 端到端样例，并完成 1 轮预热、2 轮正式计时的基准冒烟验证。

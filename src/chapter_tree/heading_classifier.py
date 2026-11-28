@@ -98,6 +98,8 @@ def _native_only_document_paths(source: Path) -> list[Path]:
         return []
     result = []
     for path in sorted(source.rglob("document.json")):
+        if not path.is_file():
+            continue
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             pages = payload.get("pages") or []

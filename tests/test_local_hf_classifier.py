@@ -179,6 +179,27 @@ class LocalHFClassifierTests(unittest.TestCase):
                     torch_module=NoCudaTorch(),
                 )
 
+    def test_context_overflow_fails_before_generate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            model_path = Path(temporary) / "Qwen"
+            model_path.mkdir()
+            (model_path / "config.json").write_text("{}", encoding="utf-8")
+            model = FakeModel()
+            model.config = type("Config", (), {"max_position_embeddings": 4})()
+            classifier = LocalHFHeadingClassifier(
+                model_path, max_tokens=256,
+                model_loader=lambda *args, **kwargs: model,
+                tokenizer_loader=lambda *args, **kwargs: FakeTokenizer(lambda payload: "{}"),
+                torch_module=FakeTorch(),
+            )
+            payload = {"max_tokens": 256, "messages": [
+                {"role": "system", "content": ""},
+                {"role": "user", "content": json.dumps({"blocks": [{"block_id": "b0"}]})},
+            ]}
+            with self.assertRaisesRegex(ValueError, "model_context_exceeded"):
+                classifier._post(payload)
+            self.assertEqual(model.generate_options, [])
+
     def test_local_model_requires_real_directory_and_config(self):
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaisesRegex(ValueError, "containing config.json"):

@@ -89,7 +89,7 @@ def main() -> None:
     # 仅排除本次输出根目录，防止批量任务读取自己正在生成的产物。
     documents = sorted(
         path for path in input_root.rglob("document.json")
-        if output_root != path.parent and output_root not in path.parents
+        if path.is_file() and output_root != path.parent and output_root not in path.parents
     )
     if not documents:
         parser.error("输入目录下没有 document.json")

@@ -27,6 +27,7 @@ from chapter_tree.heading_hierarchy import HIERARCHY_MODES, predict_document_str
 from chapter_tree.local_hf_classifier import LocalHFHeadingClassifier
 from chapter_tree.native_classifier import NativeHeadingClassifier
 from chapter_tree.zero_shot_classifier import OpenAICompatibleHeadingClassifier
+from doc_parser.native_text import reflow_native_documents
 
 
 def main() -> None:
@@ -63,6 +64,18 @@ def main() -> None:
         raise ValueError("--resume 目前需要与 --hierarchy-mode 一起使用")
     if output.exists() and not args.resume:
         raise ValueError("Prediction output already exists; use a new file or --resume")
+    # 新 IR 已由 parser 分段；这里仅自动迁移旧版超长的 native_only IR。
+    # 必须在读取续跑检查点之前完成，以便移除受影响文档的陈旧块预测。
+    reflow = reflow_native_documents(
+        args.input,
+        predictions=output if args.resume and output.exists() else None,
+    )
+    if reflow["changed_document_count"]:
+        print(
+            f"[native-reflow] migrated={reflow['changed_document_count']}; "
+            f"stale_predictions_removed={reflow['removed_stale_prediction_count']}",
+            file=sys.stderr, flush=True,
+        )
     resumed_predictions = []
     if args.resume and output.exists():
         with output.open("r", encoding="utf-8") as stream:

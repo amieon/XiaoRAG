@@ -136,11 +136,16 @@ class DocumentStructureTests(unittest.TestCase):
                 mock.patch.object(sys, "argv", arguments),
                 mock.patch.object(classify_headings, "load_heading_examples", return_value=items),
                 mock.patch.object(classify_headings, "LocalHFHeadingClassifier", return_value=classifier),
+                mock.patch.object(
+                    classify_headings, "reflow_native_documents",
+                    return_value={"changed_document_count": 0, "removed_stale_prediction_count": 0},
+                ) as reflow,
                 mock.patch("sys.stdout", new=io.StringIO()),
             ):
                 classify_headings.main()
             rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
 
+        reflow.assert_called_once_with("unused", predictions=output)
         self.assertEqual(classifier.seen_documents, [{"doc_b"}])
         self.assertEqual([row["document_id"] for row in rows], ["doc_a", "doc_b"])
 

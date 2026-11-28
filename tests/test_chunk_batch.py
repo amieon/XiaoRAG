@@ -36,6 +36,7 @@ def test_python_batch_continues_after_failure_and_resumes_completed_documents(tm
     derived_ir = json.loads((source / "甲" / "results" / "document.json").read_text(encoding="utf-8"))
     derived_ir["document_id"] = "doc-丁"
     (derived / "document.json").write_text(json.dumps(derived_ir, ensure_ascii=False), encoding="utf-8")
+    (source / "源文件同名目录" / "document.json").mkdir(parents=True)
     predictions = tmp_path / "预测.jsonl"
     rows = [
         {"document_id": first, "block_id": "b0", "label": "body"},

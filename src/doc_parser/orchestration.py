@@ -16,6 +16,7 @@ from .knowledge_units import (
     build_knowledge_units as build_units,
     write_knowledge_units,
 )
+from .native_text import segment_native_page
 from .preparation import prepare_document
 from .pipeline import (
     ParserConfig,
@@ -108,7 +109,7 @@ def _native_pages(
         page_id = f"{document_id}_p{page_no:04d}"
         block_id = f"{page_id}_b0000"
         relative_raw = objects_path.relative_to(prepared_root).as_posix()
-        pages.append(Page(
+        page = Page(
             page_id=page_id,
             page_no=page_no,
             width=1.0,
@@ -131,7 +132,9 @@ def _native_pages(
             )],
             source=SourceRef(engine="native_extraction", raw_page=page_no, raw_path=relative_raw),
             metadata={"native_only": True, "source_document_id": package_root.name},
-        ))
+        )
+        page, _ = segment_native_page(page)
+        pages.append(page)
     return pages
 
 

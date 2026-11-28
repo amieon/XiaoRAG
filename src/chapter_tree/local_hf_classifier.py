@@ -187,6 +187,14 @@ class LocalHFHeadingClassifier(OpenAICompatibleHeadingClassifier):
             generation_options["max_new_tokens"] = min(
                 max_tokens, max(map(len, token_sequences)) + 1,
             )
+        context_limit = int(getattr(getattr(self.hf_model, "config", None), "max_position_embeddings", 0) or 0)
+        required_tokens = input_length + generation_options["max_new_tokens"]
+        if context_limit and required_tokens > context_limit:
+            raise ValueError(
+                "model_context_exceeded: "
+                f"input_tokens={input_length}, max_new_tokens={generation_options['max_new_tokens']}, "
+                f"context_limit={context_limit}; reflow oversized native IR blocks instead of truncating"
+            )
         self.generation_count += 1
         generation_id = self.generation_count
         started = time.perf_counter()
