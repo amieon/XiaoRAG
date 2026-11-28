@@ -101,7 +101,11 @@ def _cdc_text_unit(unit):
 
 def _cdc_segment_parts(units, sizing, clause_path):
     """在连续正文上切分，再把全局区间映射回原始 IR 块，证据不丢字、不重叠。"""
-    blocks = [block for unit in units for block in unit]
+    # Empty blocks are attached later as source-only provenance. Rendering them
+    # here would create delimiter-only CDC text even when every block is empty.
+    blocks = [block for unit in units for block in unit if block["text"]]
+    if not blocks:
+        return []
     layout, cursor = [], 0
     for block in blocks:
         end = cursor + len(block["text"])
@@ -201,11 +205,41 @@ def _child_parts(group, config):
             pending.extend(unit)
             length += size + (2 if length else 0)
         flush_atomic_run()
+
+    # CDC intentionally returns no spans for empty text. Keep those IR blocks as
+    # source-only provenance instead of dropping them from child source coverage.
+    source_blocks = list(group["blocks"])
+    represented = {
+        ref["block_id"]
+        for part in parts
+        for block in part["blocks"]
+        for ref in block.get("sources", [])
+    }
+    empty_blocks = [
+        block for block in source_blocks
+        if not block["text"]
+        and all(ref["block_id"] not in represented for ref in block.get("sources", []))
+    ]
+    if empty_blocks:
+        if not parts:
+            parts = [{"text": "", "blocks": [], "split_reasons": []}]
+        parts[0]["source_only_blocks"] = empty_blocks
+        parts[0]["split_reasons"].append("empty_source_block")
     return parts
 
 
-def _chunk_record(document_id, chunk_id, level, parent_id, group, blocks, text, channel, config, reasons=(), clause_path=None):
-    refs = unique_refs(blocks)
+def _chunk_record(
+    document_id, chunk_id, level, parent_id, group, blocks, text, channel, config,
+    reasons=(), clause_path=None, source_only_blocks=(),
+):
+    # Empty IR blocks contribute provenance but no rendered text or body slice.
+    source_only_blocks = list(source_only_blocks)
+    if source_only_blocks:
+        selected = {block["block_id"] for block in [*blocks, *source_only_blocks]}
+        ordered_blocks = [block for block in group["blocks"] if block["block_id"] in selected]
+        refs = unique_refs(ordered_blocks)
+    else:
+        refs = unique_refs(blocks)
     title_path = group.get("title_path", [])
     selected_clauses = group.get("clause_path", []) if clause_path is None else clause_path
     prefix = " > ".join(dict.fromkeys([*title_path, *selected_clauses]))
@@ -247,7 +281,8 @@ def _chunk_record(document_id, chunk_id, level, parent_id, group, blocks, text, 
         "metadata": {
             "context": deepcopy(group.get("context", {})),
             "atomic_structural_unit": bool(group.get("atomic")),
-            "block_kinds": sorted({block["kind"] for block in blocks}),
+            "block_kinds": sorted({block["kind"] for block in [*blocks, *source_only_blocks]}),
+            "source_only_empty_block_ids": [block["block_id"] for block in source_only_blocks],
             "split_reasons": list(reasons),
             "oversize_character_budget": len(full) > config["sizing"]["max_chars"],
             "token_limit_verified": False,
@@ -312,6 +347,7 @@ def chunk_document(
                 ir["document_id"], child_id, "child", parent_id, group,
                 part["blocks"], part["text"], channel, config,
                 part["split_reasons"], part.get("clause_path"),
+                source_only_blocks=part.get("source_only_blocks", ()),
             )
             parent["child_ids"].append(child_id)
             children.append(child)

@@ -94,6 +94,32 @@ def test_real_docx_numbering_is_extracted_and_aligned_by_rendered_marker(tmp_pat
     assert attached[0]["native_structure_match"] == "unique_exact_text"
 
 
+def test_empty_heading_and_body_blocks_keep_source_coverage_without_adding_text():
+    ir = ir_with_texts([("b0", "", {}), ("b1", "正文。", {}), ("b2", "", {})])
+    result = chunk_document(
+        ir, config=load_config(),
+        predictions=[{"block_id": "b0", "label": "heading", "heading_level": 1}],
+    )
+    assert len(result["children"]) == 1
+    child = result["children"][0]
+    assert child["body_text"] == "正文。"
+    assert child["source_block_ids"] == ["b0", "b1", "b2"]
+    assert child["metadata"]["source_only_empty_block_ids"] == ["b0", "b2"]
+    assert [part["logical_block_id"] for part in child["metadata"]["body_parts"]] == ["b1"]
+    assert validate_result(result, ir)["status"] == "passed"
+
+
+def test_wholly_empty_group_has_provenance_but_no_fabricated_text():
+    ir = ir_with_texts([("b0", "", {}), ("b1", "", {})])
+    result = chunk_document(ir, config=load_config())
+    assert len(result["children"]) == 1
+    child = result["children"][0]
+    assert child["text"] == "" and child["body_text"] == ""
+    assert child["source_block_ids"] == ["b0", "b1"]
+    assert child["metadata"]["body_parts"] == []
+    assert validate_result(result, ir)["status"] == "passed"
+
+
 def test_chunk_cli_emits_structural_chunks_and_tree(tmp_path):
     ir = ir_with_texts([("b0", "第一章 总则", {}), ("b1", "第一条 正文。", {})])
     source = tmp_path / "document.json"

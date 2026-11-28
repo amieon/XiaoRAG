@@ -1,5 +1,6 @@
 """Independent integrity checks for emitted local chunk records."""
 from collections import Counter
+import json
 
 from .model import normalize_document
 
@@ -11,6 +12,7 @@ def validate_result(result, ir, native=None):
     all_chunks = parents + children
     ids = [c["chunk_id"] for c in all_chunks]
     issues = []
+    issue_details = {}
     if len(ids) != len(set(ids)):
         issues.append("duplicate_chunk_id")
     by_parent = Counter(c["parent_id"] for c in children)
@@ -22,8 +24,16 @@ def validate_result(result, ir, native=None):
         if parent["child_ids"] != actual:
             issues.append("child_id_list")
         child_sources = {r["block_id"] for c in children if c["parent_id"] == parent["chunk_id"] for r in c["source_refs"]}
-        if child_sources != set(parent["source_block_ids"]):
+        parent_sources = set(parent["source_block_ids"])
+        if child_sources != parent_sources:
             issues.append("child_source_coverage")
+            issue_details.setdefault("child_source_coverage", []).append({
+                "parent_id": parent["chunk_id"],
+                "missing_block_ids": sorted(parent_sources - child_sources),
+                "unexpected_block_ids": sorted(child_sources - parent_sources),
+                "parent_source_block_ids": parent["source_block_ids"],
+                "child_source_block_ids": sorted(child_sources),
+            })
         siblings = [c for c in children if c["parent_id"] == parent["chunk_id"]]
         if parent["metadata"].get("body_rendering") == "format_override":
             if len(siblings) != 1 or siblings[0]["body_text"] != parent["body_text"]:
@@ -49,7 +59,8 @@ def validate_result(result, ir, native=None):
                     if start != position:
                         issues.append("logical_body_gap_or_overlap")
                     position = end
-                if position != len(expected_parts[key]["text"]) or not ranges:
+                expected_length = len(expected_parts[key]["text"])
+                if position != expected_length or (not ranges and expected_length > 0):
                     issues.append("logical_body_gap_or_overlap")
     for chunk in all_chunks:
         if chunk["document_id"] != ir["document_id"]:
@@ -101,6 +112,10 @@ def validate_result(result, ir, native=None):
                 except (TypeError, ValueError, KeyError, IndexError):
                     issues.append("invalid_native_pointer")
     if issues:
-        raise ValueError("chunk_integrity_" + sorted(set(issues))[0])
+        issue = sorted(set(issues))[0]
+        message = "chunk_integrity_" + issue
+        if issue in issue_details:
+            message += ": " + json.dumps(issue_details[issue], ensure_ascii=False, separators=(",", ":"))
+        raise ValueError(message)
     return {"status": "passed", "check_count": len(all_chunks) * 4 + len(parents) * 2 + 2,
             "error_count": 0}
